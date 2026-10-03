@@ -1,0 +1,7 @@
+.cache/
+build_x64/
+staging/
+dist/
+*.pdb
+EBRecorder-*-windows-x64.zip
+EBRecorder-v*-Windows-x64.zip

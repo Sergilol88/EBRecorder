@@ -1,0 +1,1140 @@
+// SPDX-FileCopyrightText: 2026 Sergilol88
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include <obs-module.h>
+#include <obs-frontend-api.h>
+#include <util/bmem.h>
+#include <util/config-file.h>
+
+#include <QAbstractItemView>
+#include <QByteArray>
+#include <QCheckBox>
+#include <QDateTime>
+#include <QDialog>
+#include <QDir>
+#include <QFont>
+#include <QFileInfo>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QPointer>
+#include <QSettings>
+#include <QPushButton>
+#include <QString>
+#include <QStandardPaths>
+#include <QTableWidget>
+#include <QStringList>
+#include <QTimer>
+#include <QVBoxLayout>
+
+#include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("eb-recorder", "en-US")
+
+namespace {
+constexpr const char *kVersion = "0.3.0";
+constexpr const char *kEbEncoderPrefix = "multitrack video video encoder ";
+constexpr const char *kEbAudioEncoderName = "multitrack video live audio 0";
+constexpr const char *kLocalOutputName = "eb-recorder local output";
+constexpr const char *kLocalOutputType = "ffmpeg_muxer";
+// Keep Matroska clusters short so an interrupted session leaves only a small
+// tail at risk.  The MKV container itself does not depend on a final MOOV-like
+// index to remain readable after an abrupt process/power loss.
+constexpr const char *kMuxerSettings = "cluster_time_limit=1000";
+// Timers are intentionally coarse and low-frequency. They are only used for
+// lightweight state discovery; the plugin never touches display timing, VRR,
+// G-SYNC, refresh-rate or Windows/NVIDIA display configuration APIs.
+constexpr int kAutoStartRetryMs = 500;
+constexpr int kAutoStartTimeoutMs = 15000;
+constexpr int kDialogRefreshMs = 1000;
+
+struct EncoderInfo {
+	int index = -1;
+	std::string name;
+	std::string codec;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	int64_t bitrate = 0;
+	bool active = false;
+};
+
+enum class RecordingUiState {
+	Idle,
+	Recording,
+	Stopping,
+	Stopped,
+	Error,
+};
+
+obs_output_t *g_recordingOutput = nullptr;
+QString g_recordingPath;
+QString g_recordingError;
+RecordingUiState g_recordingUiState = RecordingUiState::Idle;
+bool g_frontendCallbackRegistered = false;
+bool g_obsExiting = false;
+
+QString g_settingsPath;
+bool g_autoRecordEnabled = false;
+bool g_autoStartPending = false;
+qint64 g_autoStartDeadlineMs = 0;
+QTimer *g_autoStartTimer = nullptr;
+
+QString fallbackText(const char *key)
+{
+	const char *locale = obs_get_locale();
+	const bool russian = locale && std::strncmp(locale, "ru", 2) == 0;
+
+	struct Translation {
+		const char *key;
+		const char *en;
+		const char *ru;
+	};
+
+	static const Translation translations[] = {
+		{"EBRecorder.Title", "EB Recorder 0.3.0", "EB Recorder 0.3.0"},
+		{"EBRecorder.Intro",
+		 "Version 0.3.0 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and audio encoders. Recording can be started manually or automatically together with the EB stream.",
+		 "Версия 0.3.0 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающие EB-кодировщики видео и звука. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
+		{"EBRecorder.Status.None",
+		 "No active Enhanced Broadcasting video encoders detected. Start an EB stream and refresh.",
+		 "Активные видеокодировщики Enhanced Broadcasting не найдены. Запусти EB-трансляцию и обнови список."},
+		{"EBRecorder.Status.Found", "Detected %1 active Enhanced Broadcasting video encoder(s).",
+		 "Обнаружено активных видеокодировщиков Enhanced Broadcasting: %1."},
+		{"EBRecorder.Selected.None", "Top EB stream: not available.", "Верхний EB-поток: недоступен."},
+		{"EBRecorder.Selected.Found", "Top EB stream: encoder %1 — %2, %3×%4, %5 kbps.",
+		 "Верхний EB-поток: кодировщик %1 — %2, %3×%4, %5 кбит/с."},
+		{"EBRecorder.Audio.Ready", "EB audio: %1 is active.", "EB-аудио: %1 активно."},
+		{"EBRecorder.Audio.Missing", "EB audio: %1 is not active yet.", "EB-аудио: %1 пока не активно."},
+		{"EBRecorder.Recording.Idle", "Local EB recording: stopped.", "Локальная EB-запись: остановлена."},
+		{"EBRecorder.Recording.Active", "Local EB recording: RECORDING → %1",
+		 "Локальная EB-запись: ИДЁТ → %1"},
+		{"EBRecorder.Recording.Stopping", "Local EB recording: stopping… → %1",
+		 "Локальная EB-запись: останавливается… → %1"},
+		{"EBRecorder.Recording.Stopped", "Local EB recording stopped. Last file: %1",
+		 "Локальная EB-запись остановлена. Последний файл: %1"},
+		{"EBRecorder.Recording.Error", "Local EB recording error: %1", "Ошибка локальной EB-записи: %1"},
+		{"EBRecorder.Recording.AutoPending", "Automatic recording: waiting for active EB encoders…",
+		 "Автозапись: ожидаю активные EB-кодировщики…"},
+		{"EBRecorder.Settings", "Settings", "Настройки"},
+		{"EBRecorder.AutoRecord", "Automatically start recording with the EB stream",
+		 "Автоматически начинать запись при запуске EB-трансляции"},
+		{"EBRecorder.AutoRecord.Tooltip",
+		 "When enabled, EB Recorder starts one local recording after each EB stream successfully starts. Manually stopping that recording does not start it again until the next stream. Disabling this option does not stop a recording that is already running.",
+		 "Если включено, EB Recorder один раз автоматически запускает локальную запись после успешного старта каждой EB-трансляции. Если остановить такую запись вручную, она не запустится снова до следующего стрима. Отключение этой настройки не останавливает уже идущую запись."},
+		{"EBRecorder.Error.AlreadyActive", "The local EB output is already active.",
+		 "Локальная EB-запись уже активна."},
+		{"EBRecorder.Error.NoTop", "No active TOP EB video encoder is available.",
+		 "Нет активного верхнего EB-видеокодировщика."},
+		{"EBRecorder.Error.NoAudio", "The active EB audio encoder was not found.",
+		 "Активный EB-аудиокодировщик не найден."},
+		{"EBRecorder.Error.OutputCreate", "Could not create the Matroska recording output.", "Не удалось создать Matroska output для записи."},
+		{"EBRecorder.Error.AttachReuse", "OBS did not attach the existing EB encoder objects to the local output.",
+		 "OBS не подключил существующие EB-кодировщики к локальному output."},
+		{"EBRecorder.Error.OutputStart", "OBS could not start the local Matroska output%1.",
+		 "OBS не смог запустить локальный Matroska output%1."},
+		{"EBRecorder.Error.Path", "Could not prepare the recording folder.", "Не удалось подготовить папку записи."},
+		{"EBRecorder.Col.Index", "Index", "Индекс"},
+		{"EBRecorder.Col.Codec", "Codec", "Кодек"},
+		{"EBRecorder.Col.Resolution", "Resolution", "Разрешение"},
+		{"EBRecorder.Col.Bitrate", "Bitrate", "Битрейт"},
+		{"EBRecorder.Col.Active", "Active", "Активен"},
+		{"EBRecorder.Col.Role", "Role", "Роль"},
+		{"EBRecorder.Col.Name", "OBS encoder name", "Имя кодировщика OBS"},
+		{"EBRecorder.Yes", "Yes", "Да"},
+		{"EBRecorder.No", "No", "Нет"},
+		{"EBRecorder.Top", "TOP", "ВЕРХНИЙ"},
+		{"EBRecorder.Refresh", "Refresh", "Обновить"},
+		{"EBRecorder.StartRecording", "Start recording", "Начать запись"},
+		{"EBRecorder.StopRecording", "Stop recording", "Остановить запись"},
+		{"EBRecorder.Close", "Close", "Закрыть"},
+	};
+
+	for (const auto &entry : translations) {
+		if (std::strcmp(key, entry.key) == 0)
+			return QString::fromUtf8(russian ? entry.ru : entry.en);
+	}
+
+	return QString::fromUtf8(key ? key : "");
+}
+
+QString ebTr(const char *key)
+{
+	const char *text = obs_module_text(key);
+	if (text && std::strcmp(text, key) != 0)
+		return QString::fromUtf8(text);
+
+	return fallbackText(key);
+}
+
+void logLocaleDiagnostics()
+{
+	obs_module_t *module = obs_current_module();
+	const char *locale = obs_get_locale();
+	const char *binaryPath = obs_get_module_binary_path(module);
+	const char *dataPath = obs_get_module_data_path(module);
+
+	blog(LOG_INFO, "[EB Recorder] locale=%s", locale ? locale : "<null>");
+	blog(LOG_INFO, "[EB Recorder] module binary path: %s", binaryPath ? binaryPath : "<null>");
+	blog(LOG_INFO, "[EB Recorder] module data path: %s", dataPath ? dataPath : "<null>");
+
+	char *enLocalePath = obs_module_file("locale/en-US.ini");
+	char *ruLocalePath = obs_module_file("locale/ru-RU.ini");
+	blog(LOG_INFO, "[EB Recorder] locale/en-US.ini: %s", enLocalePath ? enLocalePath : "NOT FOUND");
+	blog(LOG_INFO, "[EB Recorder] locale/ru-RU.ini: %s", ruLocalePath ? ruLocalePath : "NOT FOUND");
+
+	const char *translatedTitle = nullptr;
+	const bool titleFound = obs_module_get_string("EBRecorder.Title", &translatedTitle);
+	blog(LOG_INFO, "[EB Recorder] OBS locale lookup: %s%s%s", titleFound ? "OK" : "FAILED",
+	     titleFound && translatedTitle ? " -> " : "", titleFound && translatedTitle ? translatedTitle : "");
+
+	if (enLocalePath)
+		bfree(enLocalePath);
+	if (ruLocalePath)
+		bfree(ruLocalePath);
+}
+
+QString codecLabel(const std::string &codec)
+{
+	if (codec == "h264")
+		return QStringLiteral("H.264");
+	if (codec == "hevc")
+		return QStringLiteral("HEVC");
+	if (codec == "av1")
+		return QStringLiteral("AV1");
+	return QString::fromStdString(codec);
+}
+
+int parseEncoderIndex(const char *name)
+{
+	if (!name)
+		return -1;
+
+	const size_t prefixLength = std::strlen(kEbEncoderPrefix);
+	if (std::strncmp(name, kEbEncoderPrefix, prefixLength) != 0)
+		return -1;
+
+	const char *first = name + prefixLength;
+	const char *last = name + std::strlen(name);
+	if (first == last)
+		return -1;
+
+	int index = -1;
+	const auto result = std::from_chars(first, last, index);
+	if (result.ec != std::errc{} || result.ptr != last || index < 0)
+		return -1;
+
+	return index;
+}
+
+bool collectEncoder(void *param, obs_encoder_t *encoder)
+{
+	auto *encoders = static_cast<std::vector<EncoderInfo> *>(param);
+	if (!encoder || !encoders)
+		return true;
+
+	const char *name = obs_encoder_get_name(encoder);
+	const int index = parseEncoderIndex(name);
+	if (index < 0)
+		return true;
+
+	EncoderInfo info;
+	info.index = index;
+	info.name = name ? name : "";
+	const char *codec = obs_encoder_get_codec(encoder);
+	info.codec = codec ? codec : "unknown";
+	info.width = obs_encoder_get_width(encoder);
+	info.height = obs_encoder_get_height(encoder);
+	info.active = obs_encoder_active(encoder);
+
+	obs_data_t *settings = obs_encoder_get_settings(encoder);
+	if (settings) {
+		info.bitrate = obs_data_get_int(settings, "bitrate");
+		obs_data_release(settings);
+	}
+
+	encoders->push_back(std::move(info));
+	return true;
+}
+
+std::vector<EncoderInfo> getEbEncoders()
+{
+	std::vector<EncoderInfo> result;
+	result.reserve(4);
+	obs_enum_encoders(collectEncoder, &result);
+	std::sort(result.begin(), result.end(), [](const EncoderInfo &a, const EncoderInfo &b) {
+		return a.index < b.index;
+	});
+	return result;
+}
+
+const EncoderInfo *findTopEncoder(const std::vector<EncoderInfo> &encoders)
+{
+	const EncoderInfo *best = nullptr;
+	uint64_t bestPixels = 0;
+
+	for (const auto &encoder : encoders) {
+		if (!encoder.active)
+			continue;
+
+		const uint64_t pixels = static_cast<uint64_t>(encoder.width) * encoder.height;
+		if (!best || pixels > bestPixels ||
+		    (pixels == bestPixels && encoder.bitrate > best->bitrate)) {
+			best = &encoder;
+			bestPixels = pixels;
+		}
+	}
+
+	return best;
+}
+
+QString makeSignature(const std::vector<EncoderInfo> &encoders, const EncoderInfo *top)
+{
+	QStringList parts;
+	for (const auto &encoder : encoders) {
+		parts << QStringLiteral("%1:%2:%3x%4:%5:%6")
+				 .arg(encoder.index)
+				 .arg(QString::fromStdString(encoder.codec))
+				 .arg(encoder.width)
+				 .arg(encoder.height)
+				 .arg(encoder.bitrate)
+				 .arg(encoder.active ? 1 : 0);
+	}
+	parts << QStringLiteral("top=%1").arg(top ? top->index : -1);
+	return parts.join('|');
+}
+
+bool ebAudioEncoderActive()
+{
+	obs_encoder_t *audio = obs_get_encoder_by_name(kEbAudioEncoderName);
+	if (!audio)
+		return false;
+
+	const bool active = obs_encoder_active(audio);
+	obs_encoder_release(audio);
+	return active;
+}
+
+QString obsRecordingDirectory()
+{
+	config_t *config = obs_frontend_get_profile_config();
+	const char *path = nullptr;
+
+	if (config) {
+		const char *mode = config_get_string(config, "Output", "Mode");
+		if (mode && std::strcmp(mode, "Advanced") == 0) {
+			const char *type = config_get_string(config, "AdvOut", "RecType");
+			if (type && *type && std::strcmp(type, "Standard") != 0)
+				path = config_get_string(config, "AdvOut", "FFFilePath");
+			else
+				path = config_get_string(config, "AdvOut", "RecFilePath");
+		} else {
+			path = config_get_string(config, "SimpleOutput", "FilePath");
+		}
+	}
+
+	QString directory = path && *path ? QString::fromUtf8(path) : QString();
+	if (directory.isEmpty())
+		directory = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+	return QDir::cleanPath(directory);
+}
+
+QString makeRecordingPath()
+{
+	const QString directory = obsRecordingDirectory();
+	if (directory.isEmpty())
+		return {};
+
+	QDir dir(directory);
+	if (!dir.exists() && !QDir().mkpath(directory))
+		return {};
+
+	const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_HH-mm-ss"));
+	QString candidate = dir.filePath(QStringLiteral("EBRecorder_%1.mkv").arg(stamp));
+	int suffix = 2;
+	while (QFileInfo::exists(candidate)) {
+		candidate = dir.filePath(QStringLiteral("EBRecorder_%1_%2.mkv").arg(stamp).arg(suffix++));
+	}
+	return QDir::toNativeSeparators(candidate);
+}
+
+bool recordingOutputActive()
+{
+	return g_recordingOutput && obs_output_active(g_recordingOutput);
+}
+
+void releaseInactiveRecordingOutput()
+{
+	if (!g_recordingOutput || obs_output_active(g_recordingOutput))
+		return;
+
+	blog(LOG_INFO, "[EB Recorder] releasing inactive local output");
+	obs_output_release(g_recordingOutput);
+	g_recordingOutput = nullptr;
+
+	if (g_recordingUiState == RecordingUiState::Stopping ||
+	    g_recordingUiState == RecordingUiState::Recording) {
+		g_recordingUiState = RecordingUiState::Stopped;
+	}
+}
+
+void setRecordingError(const QString &error)
+{
+	g_recordingError = error;
+	g_recordingUiState = RecordingUiState::Error;
+	blog(LOG_ERROR, "[EB Recorder] %s", error.toUtf8().constData());
+}
+
+bool startLocalRecording(const EncoderInfo &top, QString &error)
+{
+	releaseInactiveRecordingOutput();
+	if (recordingOutputActive()) {
+		error = ebTr("EBRecorder.Error.AlreadyActive");
+		return false;
+	}
+
+	obs_encoder_t *video = obs_get_encoder_by_name(top.name.c_str());
+	if (!video || !obs_encoder_active(video)) {
+		if (video)
+			obs_encoder_release(video);
+		error = ebTr("EBRecorder.Error.NoTop");
+		return false;
+	}
+
+	obs_encoder_t *audio = obs_get_encoder_by_name(kEbAudioEncoderName);
+	if (!audio || !obs_encoder_active(audio)) {
+		if (audio)
+			obs_encoder_release(audio);
+		obs_encoder_release(video);
+		error = ebTr("EBRecorder.Error.NoAudio");
+		return false;
+	}
+
+	const QString path = makeRecordingPath();
+	if (path.isEmpty()) {
+		obs_encoder_release(audio);
+		obs_encoder_release(video);
+		error = ebTr("EBRecorder.Error.Path");
+		return false;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] recording start requested");
+	blog(LOG_INFO, "[EB Recorder] TOP encoder acquired: %p name='%s' codec=%s %ux%u bitrate=%lld kbps",
+	     static_cast<void *>(video), top.name.c_str(), top.codec.c_str(), top.width, top.height,
+	     static_cast<long long>(top.bitrate));
+	blog(LOG_INFO, "[EB Recorder] audio encoder acquired: %p name='%s' codec=%s",
+	     static_cast<void *>(audio), kEbAudioEncoderName,
+	     obs_encoder_get_codec(audio) ? obs_encoder_get_codec(audio) : "unknown");
+
+	obs_data_t *settings = obs_data_create();
+	const QByteArray pathUtf8 = path.toUtf8();
+	obs_data_set_string(settings, "path", pathUtf8.constData());
+	// ffmpeg_muxer selects Matroska from the .mkv extension.  Limit clusters
+	// to 1 second so an abrupt termination normally sacrifices at most a small
+	// tail rather than the whole recording.
+	obs_data_set_string(settings, "muxer_settings", kMuxerSettings);
+	obs_output_t *output = obs_output_create(kLocalOutputType, kLocalOutputName, settings, nullptr);
+	obs_data_release(settings);
+
+	if (!output) {
+		obs_encoder_release(audio);
+		obs_encoder_release(video);
+		error = ebTr("EBRecorder.Error.OutputCreate");
+		return false;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] local output created: %p type=%s container=mkv path='%s'",
+	     static_cast<void *>(output), kLocalOutputType, pathUtf8.constData());
+	blog(LOG_INFO, "[EB Recorder] crash-resilience: Matroska clusters <= 1000 ms (muxer_settings='%s')",
+	     kMuxerSettings);
+
+	// IMPORTANT: attach the already-existing Enhanced Broadcasting encoder objects.
+	// obs_output_set_* takes its own references. EB Recorder never creates a video
+	// or audio encoder in v0.3.0.
+	obs_output_set_video_encoder2(output, video, 0);
+	obs_output_set_audio_encoder(output, audio, 0);
+
+	const bool videoReused = obs_output_get_video_encoder2(output, 0) == video;
+	const bool audioReused = obs_output_get_audio_encoder(output, 0) == audio;
+	blog(LOG_INFO, "[EB Recorder] attached existing TOP video encoder: %s (output=%p encoder=%p)",
+	     videoReused ? "YES" : "NO", static_cast<void *>(output), static_cast<void *>(video));
+	blog(LOG_INFO, "[EB Recorder] attached existing EB audio encoder: %s (output=%p encoder=%p)",
+	     audioReused ? "YES" : "NO", static_cast<void *>(output), static_cast<void *>(audio));
+
+	obs_encoder_release(audio);
+	obs_encoder_release(video);
+
+	if (!videoReused || !audioReused) {
+		obs_output_release(output);
+		error = ebTr("EBRecorder.Error.AttachReuse");
+		return false;
+	}
+
+	if (!obs_output_start(output)) {
+		const char *lastError = obs_output_get_last_error(output);
+		const QString detail = lastError && *lastError
+					       ? QStringLiteral(": %1").arg(QString::fromUtf8(lastError))
+					       : QString();
+		error = ebTr("EBRecorder.Error.OutputStart").arg(detail);
+		blog(LOG_ERROR, "[EB Recorder] local output start failed%s%s", lastError && *lastError ? ": " : "",
+		     lastError && *lastError ? lastError : "");
+		obs_output_release(output);
+		return false;
+	}
+
+	g_recordingOutput = output;
+	g_recordingPath = path;
+	g_recordingError.clear();
+	g_recordingUiState = RecordingUiState::Recording;
+
+	blog(LOG_INFO, "[EB Recorder] recording started: container=mkv path='%s'", pathUtf8.constData());
+	blog(LOG_INFO, "[EB Recorder] encoder reuse invariant: no encoder was created by EB Recorder");
+	return true;
+}
+
+void stopLocalRecording(bool force, const char *reason)
+{
+	if (!g_recordingOutput)
+		return;
+
+	if (!obs_output_active(g_recordingOutput)) {
+		releaseInactiveRecordingOutput();
+		return;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] stopping local recording (%s, force=%s)", reason ? reason : "unspecified",
+	     force ? "yes" : "no");
+	g_recordingUiState = RecordingUiState::Stopping;
+
+	if (force)
+		obs_output_force_stop(g_recordingOutput);
+	else
+		obs_output_stop(g_recordingOutput);
+}
+
+void refreshDialogIfOpen();
+
+void cleanupRecordingOutput()
+{
+	if (!g_recordingOutput)
+		return;
+
+	if (obs_output_active(g_recordingOutput)) {
+		blog(LOG_WARNING, "[EB Recorder] local output still active during cleanup; forcing stop");
+		obs_output_force_stop(g_recordingOutput);
+	}
+
+	obs_output_release(g_recordingOutput);
+	g_recordingOutput = nullptr;
+	g_recordingUiState = RecordingUiState::Stopped;
+}
+
+void initializeSettingsPath()
+{
+	char *path = obs_module_config_path("settings.ini");
+	if (!path) {
+		blog(LOG_WARNING, "[EB Recorder] plugin settings path is unavailable; automatic-record setting will not persist");
+		return;
+	}
+
+	g_settingsPath = QString::fromUtf8(path);
+	bfree(path);
+
+	const QFileInfo info(g_settingsPath);
+	if (!QDir().mkpath(info.absolutePath())) {
+		blog(LOG_WARNING, "[EB Recorder] could not create settings directory: %s",
+		     info.absolutePath().toUtf8().constData());
+		g_settingsPath.clear();
+		return;
+	}
+
+	QSettings settings(g_settingsPath, QSettings::IniFormat);
+	g_autoRecordEnabled = settings.value(QStringLiteral("General/AutoRecordWithStream"), false).toBool();
+	blog(LOG_INFO, "[EB Recorder] settings loaded: auto_record_with_stream=%s path='%s'",
+	     g_autoRecordEnabled ? "yes" : "no", g_settingsPath.toUtf8().constData());
+}
+
+void saveAutoRecordSetting()
+{
+	if (g_settingsPath.isEmpty())
+		return;
+
+	QSettings settings(g_settingsPath, QSettings::IniFormat);
+	settings.setValue(QStringLiteral("General/AutoRecordWithStream"), g_autoRecordEnabled);
+	settings.sync();
+	if (settings.status() != QSettings::NoError) {
+		blog(LOG_WARNING, "[EB Recorder] failed to save automatic-record setting to '%s'",
+		     g_settingsPath.toUtf8().constData());
+	}
+}
+
+void stopAutoStartTimer()
+{
+	if (g_autoStartTimer)
+		g_autoStartTimer->stop();
+}
+
+void cancelPendingAutoStart(const char *reason)
+{
+	if (!g_autoStartPending) {
+		stopAutoStartTimer();
+		return;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] automatic recording request cancelled (%s)",
+	     reason ? reason : "unspecified");
+	g_autoStartPending = false;
+	g_autoStartDeadlineMs = 0;
+	stopAutoStartTimer();
+}
+
+void tryAutomaticRecordingStart()
+{
+	if (!g_autoStartPending) {
+		stopAutoStartTimer();
+		return;
+	}
+
+	if (!g_autoRecordEnabled) {
+		cancelPendingAutoStart("setting disabled");
+		return;
+	}
+
+	if (!obs_frontend_streaming_active()) {
+		cancelPendingAutoStart("stream is no longer active");
+		return;
+	}
+
+	releaseInactiveRecordingOutput();
+	if (recordingOutputActive()) {
+		g_autoStartPending = false;
+		g_autoStartDeadlineMs = 0;
+		stopAutoStartTimer();
+		return;
+	}
+
+	const auto encoders = getEbEncoders();
+	const EncoderInfo *top = findTopEncoder(encoders);
+	const bool audioAvailable = ebAudioEncoderActive();
+
+	if (top && audioAvailable) {
+		QString error;
+		if (startLocalRecording(*top, error)) {
+			blog(LOG_INFO, "[EB Recorder] automatic recording started with EB stream");
+		} else {
+			setRecordingError(error);
+			blog(LOG_ERROR, "[EB Recorder] automatic recording start failed");
+		}
+
+		g_autoStartPending = false;
+		g_autoStartDeadlineMs = 0;
+		stopAutoStartTimer();
+		return;
+	}
+
+	if (QDateTime::currentMSecsSinceEpoch() >= g_autoStartDeadlineMs) {
+		blog(LOG_INFO,
+		     "[EB Recorder] automatic recording skipped: no active EB TOP video/audio encoders appeared within %d ms",
+		     kAutoStartTimeoutMs);
+		g_autoStartPending = false;
+		g_autoStartDeadlineMs = 0;
+		stopAutoStartTimer();
+	}
+}
+
+void ensureAutoStartTimer()
+{
+	if (g_autoStartTimer)
+		return;
+
+	g_autoStartTimer = new QTimer();
+	g_autoStartTimer->setTimerType(Qt::CoarseTimer);
+	g_autoStartTimer->setInterval(kAutoStartRetryMs);
+	QObject::connect(g_autoStartTimer, &QTimer::timeout, []() {
+		const bool wasPending = g_autoStartPending;
+		const bool wasRecording = recordingOutputActive();
+		tryAutomaticRecordingStart();
+
+		// Do not repaint the Qt dialog on every retry tick. Refresh it only when
+		// the pending/recording state actually changed. This keeps the plugin
+		// compositor-quiet on systems where windowed G-SYNC/VRR is enabled.
+		if (wasPending != g_autoStartPending || wasRecording != recordingOutputActive())
+			refreshDialogIfOpen();
+	});
+}
+
+void armAutomaticRecording(const char *reason)
+{
+	if (!g_autoRecordEnabled || recordingOutputActive())
+		return;
+
+	ensureAutoStartTimer();
+	g_autoStartPending = true;
+	g_autoStartDeadlineMs = QDateTime::currentMSecsSinceEpoch() + kAutoStartTimeoutMs;
+	blog(LOG_INFO, "[EB Recorder] automatic recording armed (%s); waiting for active EB encoders",
+	     reason ? reason : "unspecified");
+
+	tryAutomaticRecordingStart();
+	if (g_autoStartPending && g_autoStartTimer && !g_autoStartTimer->isActive())
+		g_autoStartTimer->start();
+}
+
+void setAutoRecordEnabled(bool enabled)
+{
+	if (g_autoRecordEnabled == enabled)
+		return;
+
+	g_autoRecordEnabled = enabled;
+	saveAutoRecordSetting();
+	blog(LOG_INFO, "[EB Recorder] automatic recording with EB stream: %s", enabled ? "enabled" : "disabled");
+
+	if (!enabled) {
+		cancelPendingAutoStart("setting disabled by user");
+		return;
+	}
+
+	// If the user enables the option while an EB stream is already live, start
+	// recording that current session instead of waiting for the next stream.
+	if (obs_frontend_streaming_active() && !recordingOutputActive())
+		armAutomaticRecording("setting enabled during active stream");
+}
+
+class EBRecorderDialog final : public QDialog {
+public:
+	explicit EBRecorderDialog(QWidget *parent) : QDialog(parent)
+	{
+		setAttribute(Qt::WA_DeleteOnClose, true);
+		setWindowTitle(ebTr("EBRecorder.Title"));
+		setMinimumSize(820, 500);
+		resize(940, 560);
+
+		auto *root = new QVBoxLayout(this);
+		root->setContentsMargins(14, 14, 14, 14);
+		root->setSpacing(10);
+
+		auto *intro = new QLabel(ebTr("EBRecorder.Intro"), this);
+		intro->setWordWrap(true);
+		root->addWidget(intro);
+
+		statusLabel_ = new QLabel(this);
+		statusLabel_->setWordWrap(true);
+		root->addWidget(statusLabel_);
+
+		table_ = new QTableWidget(this);
+		table_->setColumnCount(7);
+		table_->setHorizontalHeaderLabels({ebTr("EBRecorder.Col.Index"), ebTr("EBRecorder.Col.Codec"),
+						  ebTr("EBRecorder.Col.Resolution"), ebTr("EBRecorder.Col.Bitrate"),
+						  ebTr("EBRecorder.Col.Active"), ebTr("EBRecorder.Col.Role"),
+						  ebTr("EBRecorder.Col.Name")});
+		table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+		table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+		table_->setSelectionMode(QAbstractItemView::SingleSelection);
+		table_->verticalHeader()->setVisible(false);
+		table_->horizontalHeader()->setStretchLastSection(true);
+		for (int column = 0; column < 6; ++column)
+			table_->horizontalHeader()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+		root->addWidget(table_, 1);
+
+		selectedLabel_ = new QLabel(this);
+		selectedLabel_->setWordWrap(true);
+		root->addWidget(selectedLabel_);
+
+		audioLabel_ = new QLabel(this);
+		audioLabel_->setWordWrap(true);
+		root->addWidget(audioLabel_);
+
+		recordingLabel_ = new QLabel(this);
+		recordingLabel_->setWordWrap(true);
+		root->addWidget(recordingLabel_);
+
+		auto *settingsBox = new QGroupBox(ebTr("EBRecorder.Settings"), this);
+		auto *settingsLayout = new QVBoxLayout(settingsBox);
+		autoRecordCheckBox_ = new QCheckBox(ebTr("EBRecorder.AutoRecord"), settingsBox);
+		autoRecordCheckBox_->setChecked(g_autoRecordEnabled);
+		autoRecordCheckBox_->setToolTip(ebTr("EBRecorder.AutoRecord.Tooltip"));
+		settingsLayout->addWidget(autoRecordCheckBox_);
+		root->addWidget(settingsBox);
+
+		auto *buttons = new QHBoxLayout;
+		buttons->addStretch(1);
+		auto *refreshButton = new QPushButton(ebTr("EBRecorder.Refresh"), this);
+		startButton_ = new QPushButton(ebTr("EBRecorder.StartRecording"), this);
+		stopButton_ = new QPushButton(ebTr("EBRecorder.StopRecording"), this);
+		auto *closeButton = new QPushButton(ebTr("EBRecorder.Close"), this);
+		buttons->addWidget(refreshButton);
+		buttons->addWidget(startButton_);
+		buttons->addWidget(stopButton_);
+		buttons->addWidget(closeButton);
+		root->addLayout(buttons);
+
+		connect(refreshButton, &QPushButton::clicked, this, [this]() { refreshEncoders(true); });
+		connect(autoRecordCheckBox_, &QCheckBox::toggled, this, [this](bool checked) {
+			setAutoRecordEnabled(checked);
+			refreshEncoders(true);
+		});
+		connect(startButton_, &QPushButton::clicked, this, [this]() { startRecording(); });
+		connect(stopButton_, &QPushButton::clicked, this, [this]() {
+			stopLocalRecording(false, "user request");
+			refreshEncoders(true);
+		});
+		connect(closeButton, &QPushButton::clicked, this, &QDialog::close);
+
+		timer_ = new QTimer(this);
+		timer_->setTimerType(Qt::CoarseTimer);
+		timer_->setInterval(kDialogRefreshMs);
+		connect(timer_, &QTimer::timeout, this, [this]() { refreshEncoders(false); });
+		timer_->start();
+
+		refreshEncoders(true);
+		blog(LOG_INFO, "[EB Recorder] dialog created");
+	}
+
+	~EBRecorderDialog() override
+	{
+		if (timer_)
+			timer_->stop();
+		blog(LOG_INFO, "[EB Recorder] dialog destroyed");
+	}
+
+	void refreshNow() { refreshEncoders(true); }
+
+private:
+	void startRecording()
+	{
+		const auto encoders = getEbEncoders();
+		const EncoderInfo *top = findTopEncoder(encoders);
+		if (!top) {
+			setRecordingError(ebTr("EBRecorder.Error.NoTop"));
+			refreshEncoders(true);
+			return;
+		}
+
+		QString error;
+		if (!startLocalRecording(*top, error))
+			setRecordingError(error);
+		refreshEncoders(true);
+	}
+
+	void updateRecordingUi(bool topAvailable, bool audioAvailable)
+	{
+		const bool active = recordingOutputActive();
+
+		if (active && g_recordingUiState != RecordingUiState::Stopping)
+			g_recordingUiState = RecordingUiState::Recording;
+
+		if (!active && g_autoStartPending) {
+			recordingLabel_->setText(ebTr("EBRecorder.Recording.AutoPending"));
+			startButton_->setEnabled(topAvailable && audioAvailable);
+			stopButton_->setEnabled(false);
+			return;
+		}
+
+		switch (g_recordingUiState) {
+		case RecordingUiState::Recording:
+			recordingLabel_->setText(ebTr("EBRecorder.Recording.Active").arg(g_recordingPath));
+			break;
+		case RecordingUiState::Stopping:
+			recordingLabel_->setText(ebTr("EBRecorder.Recording.Stopping").arg(g_recordingPath));
+			break;
+		case RecordingUiState::Stopped:
+			recordingLabel_->setText(g_recordingPath.isEmpty()
+						 ? ebTr("EBRecorder.Recording.Idle")
+						 : ebTr("EBRecorder.Recording.Stopped").arg(g_recordingPath));
+			break;
+		case RecordingUiState::Error:
+			recordingLabel_->setText(ebTr("EBRecorder.Recording.Error").arg(g_recordingError));
+			break;
+		case RecordingUiState::Idle:
+		default:
+			recordingLabel_->setText(ebTr("EBRecorder.Recording.Idle"));
+			break;
+		}
+
+		startButton_->setEnabled(!active && topAvailable && audioAvailable);
+		stopButton_->setEnabled(active);
+	}
+
+	void refreshEncoders(bool forceLog)
+	{
+		releaseInactiveRecordingOutput();
+
+		const auto encoders = getEbEncoders();
+		const EncoderInfo *top = findTopEncoder(encoders);
+		const bool audioAvailable = ebAudioEncoderActive();
+		const int activeCount = static_cast<int>(std::count_if(encoders.begin(), encoders.end(),
+							   [](const EncoderInfo &e) { return e.active; }));
+
+		const QString encoderUiSignature = makeSignature(encoders, top) +
+					   QStringLiteral("|audio=%1").arg(audioAvailable ? 1 : 0);
+		if (encoderUiSignature != lastEncoderUiSignature_) {
+			lastEncoderUiSignature_ = encoderUiSignature;
+
+			// Rebuild the small diagnostics table only when encoder state actually
+			// changes. Previously this allocated/repainted every 500 ms even when
+			// nothing changed, which was unnecessary compositor activity.
+			table_->setUpdatesEnabled(false);
+			table_->setRowCount(static_cast<int>(encoders.size()));
+			for (int row = 0; row < static_cast<int>(encoders.size()); ++row) {
+				const auto &encoder = encoders[static_cast<size_t>(row)];
+				const bool isTop = top && encoder.index == top->index;
+
+				const QString bitrate = encoder.bitrate > 0
+								? QStringLiteral("%1 kbps").arg(encoder.bitrate)
+								: QStringLiteral("—");
+				const QString resolution = encoder.width && encoder.height
+								   ? QStringLiteral("%1×%2").arg(encoder.width).arg(encoder.height)
+								   : QStringLiteral("—");
+
+				const QString values[] = {
+					QString::number(encoder.index),
+					codecLabel(encoder.codec),
+					resolution,
+					bitrate,
+					encoder.active ? ebTr("EBRecorder.Yes") : ebTr("EBRecorder.No"),
+					isTop ? ebTr("EBRecorder.Top") : QStringLiteral("—"),
+					QString::fromStdString(encoder.name),
+				};
+
+				for (int column = 0; column < 7; ++column) {
+					auto *item = new QTableWidgetItem(values[column]);
+					if (isTop) {
+						QFont font = item->font();
+						font.setBold(true);
+						item->setFont(font);
+					}
+					table_->setItem(row, column, item);
+				}
+			}
+			table_->setUpdatesEnabled(true);
+
+			if (!top) {
+				statusLabel_->setText(ebTr("EBRecorder.Status.None"));
+				selectedLabel_->setText(ebTr("EBRecorder.Selected.None"));
+			} else {
+				statusLabel_->setText(ebTr("EBRecorder.Status.Found").arg(activeCount));
+				selectedLabel_->setText(
+					ebTr("EBRecorder.Selected.Found")
+						.arg(top->index)
+						.arg(codecLabel(top->codec))
+						.arg(top->width)
+						.arg(top->height)
+						.arg(top->bitrate));
+			}
+
+			audioLabel_->setText(audioAvailable ? ebTr("EBRecorder.Audio.Ready").arg(kEbAudioEncoderName)
+							 : ebTr("EBRecorder.Audio.Missing").arg(kEbAudioEncoderName));
+		}
+
+		const QString recordingUiSignature =
+			QStringLiteral("state=%1|rec=%2|auto=%3|pending=%4|top=%5|audio=%6|path=%7|error=%8")
+				.arg(static_cast<int>(g_recordingUiState))
+				.arg(recordingOutputActive() ? 1 : 0)
+				.arg(g_autoRecordEnabled ? 1 : 0)
+				.arg(g_autoStartPending ? 1 : 0)
+				.arg(top ? 1 : 0)
+				.arg(audioAvailable ? 1 : 0)
+				.arg(g_recordingPath)
+				.arg(g_recordingError);
+		if (recordingUiSignature != lastRecordingUiSignature_) {
+			lastRecordingUiSignature_ = recordingUiSignature;
+			updateRecordingUi(top != nullptr, audioAvailable);
+		}
+
+		const QString logSignature = encoderUiSignature + QLatin1Char('|') + recordingUiSignature;
+		if (forceLog || logSignature != lastLogSignature_) {
+			lastLogSignature_ = logSignature;
+			blog(LOG_INFO,
+			     "[EB Recorder] EB encoder scan: %d found, %d active, audio=%s, local_recording=%s, auto_record=%s, auto_pending=%s",
+			     static_cast<int>(encoders.size()), activeCount, audioAvailable ? "active" : "inactive",
+			     recordingOutputActive() ? "active" : "inactive",
+			     g_autoRecordEnabled ? "enabled" : "disabled", g_autoStartPending ? "yes" : "no");
+			for (const auto &encoder : encoders) {
+				blog(LOG_INFO,
+				     "[EB Recorder] encoder %d: %s %ux%u, bitrate=%lld kbps, active=%s%s",
+				     encoder.index, encoder.codec.c_str(), encoder.width, encoder.height,
+				     static_cast<long long>(encoder.bitrate), encoder.active ? "yes" : "no",
+				     top && encoder.index == top->index ? " [TOP]" : "");
+			}
+		}
+	}
+
+	QLabel *statusLabel_ = nullptr;
+	QTableWidget *table_ = nullptr;
+	QLabel *selectedLabel_ = nullptr;
+	QLabel *audioLabel_ = nullptr;
+	QLabel *recordingLabel_ = nullptr;
+	QCheckBox *autoRecordCheckBox_ = nullptr;
+	QPushButton *startButton_ = nullptr;
+	QPushButton *stopButton_ = nullptr;
+	QTimer *timer_ = nullptr;
+	QString lastEncoderUiSignature_;
+	QString lastRecordingUiSignature_;
+	QString lastLogSignature_;
+};
+
+QPointer<EBRecorderDialog> g_dialog;
+std::atomic<uint32_t> g_loadRefs{0};
+
+bool releaseLoadReference(uint32_t &remaining)
+{
+	uint32_t current = g_loadRefs.load(std::memory_order_acquire);
+	while (current != 0) {
+		if (g_loadRefs.compare_exchange_weak(current, current - 1, std::memory_order_acq_rel,
+		                                     std::memory_order_acquire)) {
+			remaining = current - 1;
+			return true;
+		}
+	}
+
+	remaining = 0;
+	return false;
+}
+
+void refreshDialogIfOpen()
+{
+	if (!g_dialog.isNull())
+		g_dialog->refreshNow();
+}
+
+void frontendEvent(enum obs_frontend_event event, void *)
+{
+	switch (event) {
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
+		cancelPendingAutoStart("OBS streaming stopping");
+		if (recordingOutputActive()) {
+			blog(LOG_INFO, "[EB Recorder] streaming is stopping; stopping local recording before EB teardown");
+			stopLocalRecording(false, "OBS streaming stopping");
+		}
+		break;
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+		cancelPendingAutoStart("OBS streaming stopped");
+		if (recordingOutputActive()) {
+			blog(LOG_WARNING, "[EB Recorder] local output still active after stream stopped; forcing stop");
+			stopLocalRecording(true, "OBS streaming stopped fallback");
+		}
+		releaseInactiveRecordingOutput();
+		break;
+	case OBS_FRONTEND_EVENT_EXIT:
+		g_obsExiting = true;
+		cancelPendingAutoStart("OBS exit");
+		if (recordingOutputActive())
+			stopLocalRecording(true, "OBS exit");
+		break;
+	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+		if (g_autoRecordEnabled)
+			armAutomaticRecording("OBS streaming started");
+		break;
+	default:
+		return;
+	}
+
+	refreshDialogIfOpen();
+}
+
+void openDialog(void *)
+{
+	if (g_dialog.isNull()) {
+		auto *parent = static_cast<QWidget *>(obs_frontend_get_main_window());
+		g_dialog = new EBRecorderDialog(parent);
+	}
+
+	auto *dialog = g_dialog.data();
+	if (!dialog)
+		return;
+
+	dialog->refreshNow();
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
+}
+} // namespace
+
+const char *obs_module_description(void)
+{
+	return "EB Recorder: record the highest-resolution Twitch Enhanced Broadcasting rendition by reusing the existing EB encoders.";
+}
+
+bool obs_module_load(void)
+{
+	const uint32_t loadNumber = g_loadRefs.fetch_add(1, std::memory_order_acq_rel) + 1;
+	auto *module = obs_current_module();
+	blog(LOG_INFO, "[EB Recorder] obs_module_load #%u (module=%p)", loadNumber,
+	     static_cast<void *>(module));
+
+	if (loadNumber > 1) {
+		blog(LOG_WARNING,
+		     "[EB Recorder] duplicate module initialization ignored (active load refs=%u)",
+		     loadNumber);
+		return true;
+	}
+
+	logLocaleDiagnostics();
+	initializeSettingsPath();
+	g_obsExiting = false;
+	obs_frontend_add_tools_menu_item("EB Recorder", openDialog, nullptr);
+	obs_frontend_add_event_callback(frontendEvent, nullptr);
+	g_frontendCallbackRegistered = true;
+	blog(LOG_INFO, "[EB Recorder] frontend event callback registered");
+	blog(LOG_INFO, "[EB Recorder] loaded (version %s)", kVersion);
+	return true;
+}
+
+void obs_module_unload(void)
+{
+	auto *module = obs_current_module();
+	uint32_t remaining = 0;
+	if (!releaseLoadReference(remaining)) {
+		blog(LOG_WARNING, "[EB Recorder] obs_module_unload with no matching load (module=%p)",
+		     static_cast<void *>(module));
+		return;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] obs_module_unload (module=%p, remaining load refs=%u)",
+	     static_cast<void *>(module), remaining);
+
+	if (remaining > 0) {
+		blog(LOG_INFO, "[EB Recorder] unload deferred; another logical module reference is still active");
+		return;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] unload begin (dialog=%s, recording=%s)",
+	     g_dialog.isNull() ? "null" : "alive", recordingOutputActive() ? "active" : "inactive");
+
+	cancelPendingAutoStart("module unload");
+	if (g_autoStartTimer) {
+		delete g_autoStartTimer;
+		g_autoStartTimer = nullptr;
+	}
+
+	if (g_frontendCallbackRegistered) {
+		// During normal OBS shutdown the frontend callback registry is already
+		// being torn down before module unload. Avoid asking OBS to remove a
+		// callback from an already-cleared registry (which produces a warning).
+		if (!g_obsExiting) {
+			obs_frontend_remove_event_callback(frontendEvent, nullptr);
+			blog(LOG_INFO, "[EB Recorder] frontend event callback removed");
+		} else {
+			blog(LOG_INFO, "[EB Recorder] frontend event callback removal skipped during OBS shutdown");
+		}
+		g_frontendCallbackRegistered = false;
+	}
+
+	cleanupRecordingOutput();
+
+	if (!g_dialog.isNull()) {
+		auto *dialog = g_dialog.data();
+		g_dialog.clear();
+		delete dialog;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] unloaded");
+}

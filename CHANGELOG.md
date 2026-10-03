@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0
+## [0.3.0](release-notes/v0.3.0.md)
 
 First public baseline.
 

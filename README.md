@@ -12,7 +12,7 @@ The goal is simple: keep a local high-quality VOD **without starting another vid
 
 OBS Enhanced Broadcasting can create several simultaneous video renditions for Twitch. Starting a normal local recording can add another encode session and extra GPU load.
 
-EB Recorder instead finds OBS's active Enhanced Broadcasting encoders, selects the highest-resolution rendition, and attaches that existing video encoder — plus the existing EB audio encoder — to a separate local Matroska output.
+EB Recorder instead finds OBS's active Enhanced Broadcasting encoders, selects the highest-resolution rendition, and attaches the existing video and EB audio encoders to a separate local Matroska output.
 
 ```text
 Existing Twitch EB TOP video encoder ─┐
@@ -104,7 +104,7 @@ In testing, an MKV remained playable after forcibly terminating OBS while record
 
 EB Recorder does not create a new video encoder. Its local recording path receives already-encoded packets from OBS's existing Enhanced Broadcasting encoder and muxes them to disk.
 
-In the tested three-rendition EB session, OBS still showed three GPU encode threads while EB Recorder was active — no fourth video encode thread was introduced by the plugin.
+In the tested three-rendition EB session, OBS still showed three GPU encode threads while EB Recorder was active. The plugin did not introduce a fourth video encode thread.
 
 ## VRR / G-SYNC behavior
 

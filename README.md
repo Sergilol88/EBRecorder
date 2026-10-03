@@ -82,7 +82,7 @@ Disabling the checkbox does not stop an already-running recording. Manually stop
 
 ## Output
 
-Files are written to the current OBS recording directory:
+Files are written to the same folder configured in OBS for local recordings. In **Simple** output mode, this is the path from **Settings → Output → Recording → Recording Path**. EB Recorder does not keep a separate recording-folder setting of its own.
 
 ```text
 EBRecorder_yyyy-MM-dd_HH-mm-ss.mkv

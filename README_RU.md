@@ -62,9 +62,45 @@ EB Recorder находит уже активные EB-кодировщики OBS
 C:\ProgramData\obs-studio\plugins\eb-recorder\
 ```
 
+Установщик не зависит от папки, в которой установлен OBS, поэтому обычную или Steam-версию OBS можно держать на любом диске.
+
 Установщик не создаёт записей в реестре, служб, задач планировщика и не меняет PATH.
 
 Для удаления закройте OBS и запустите `UNINSTALL.cmd` из распакованного release-архива.
+
+### Установка в portable OBS
+
+`INSTALL.cmd` рассчитан на обычную и Steam-установку OBS. Если OBS работает в portable-режиме, EB Recorder нужно установить вручную в папку portable OBS.
+
+Из распакованного архива EB Recorder:
+
+1. Скопируйте `eb-recorder\bin\64bit\eb-recorder.dll` сюда:
+
+```text
+<OBS Portable>\obs-plugins\64bit\eb-recorder.dll
+```
+
+2. Создайте эту папку, если её ещё нет:
+
+```text
+<OBS Portable>\data\obs-plugins\eb-recorder\locale\
+```
+
+3. Скопируйте `en-US.ini` и `ru-RU.ini` из `eb-recorder\data\locale\` в эту папку `locale`.
+4. Запустите portable OBS и откройте **Сервис -> EB Recorder**.
+
+Итоговая структура должна выглядеть так:
+
+```text
+<OBS Portable>\
+├─ bin\64bit\obs64.exe
+├─ obs-plugins\64bit\eb-recorder.dll
+└─ data\obs-plugins\eb-recorder\locale\
+   ├─ en-US.ini
+   └─ ru-RU.ini
+```
+
+Для portable-установки удаление тоже выполняется вручную. Закройте OBS, удалите `eb-recorder.dll` и папку `data\obs-plugins\eb-recorder`.
 
 ## Использование
 

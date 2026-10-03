@@ -27,21 +27,18 @@ The script:
 1. discovers Visual Studio through `vswhere.exe`,
 2. downloads and verifies the pinned OBS / obs-deps archives when they are not already cached,
 3. builds a minimal local x64 OBS development SDK,
-4. builds EB Recorder,
-5. stages the plugin,
-6. creates the release archive.
+4. builds EB Recorder itself in the CMake `Release` configuration,
+5. stages the plugin and rejects accidental PDB files,
+6. creates the production release archive and SHA-256 sidecar.
 
 Output:
 
 ```text
-EBRecorder-0.3.0-windows-x64.zip
-```
-
-For public releases, rename the asset to:
-
-```text
 EBRecorder-v0.3.0-Windows-x64.zip
+EBRecorder-v0.3.0-Windows-x64.zip.sha256
 ```
+
+The plugin binary is built as a production `Release` target. Debug symbols are not shipped in the user archive. The locally cached OBS development SDK may still use `RelWithDebInfo`; it is a build-only dependency and is never included in the release package.
 
 ## Clean build
 

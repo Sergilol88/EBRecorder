@@ -14,6 +14,12 @@ First public release of EB Recorder.
 - English and Russian UI.
 - No Windows display, refresh-rate, VRR/G-SYNC, NVIDIA, registry, service, power-plan or PATH configuration changes.
 
+## Production package
+
+- Windows x64 plugin binary built with the CMake `Release` configuration.
+- No PDB/debug-symbol file is included in the user ZIP.
+- The build produces a `.sha256` sidecar for the release asset.
+
 ## Tested with
 
 - OBS Studio 32.2.2 x64

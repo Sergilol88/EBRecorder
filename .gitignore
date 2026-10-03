@@ -5,3 +5,4 @@ dist/
 *.pdb
 EBRecorder-*-windows-x64.zip
 EBRecorder-v*-Windows-x64.zip
+*.sha256

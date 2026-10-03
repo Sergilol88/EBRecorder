@@ -244,12 +244,14 @@ Write-Host "Visual Studio path: $($EnvInfo.VSPath)"
 Write-Host "CMake: $($EnvInfo.CMakeVersionLine)"
 Write-Host "CMake path: $CMakeExe"
 Write-Host ''
-Write-Host 'EB Recorder r6.1 build strategy:'
+Write-Host 'EB Recorder r6.2 production build strategy:'
 Write-Host '  - no obs-plugintemplate bootstrap'
 Write-Host '  - one OBS x64 SDK build only'
 Write-Host '  - no nested Win32 build'
 Write-Host '  - dependency archives are reused from older EB Recorder folders when possible'
 Write-Host '  - OBS downloads each missing dependency at most once into its own .deps cache'
+Write-Host '  - plugin is built as CMake Release (no debug-symbol package in the user archive)'
+Write-Host '  - release staging rejects accidental .pdb files'
 Write-Host ''
 
 if ($FullClean) {
@@ -320,7 +322,7 @@ if (-not (Test-Path $ObsDepsPrefix)) {
 $PrefixPath = "$ObsSdk;$ObsDepsPrefix;$QtPrefix"
 
 Write-Host ''
-Write-Host 'EB Recorder build package: r6.1' -ForegroundColor Cyan
+Write-Host 'EB Recorder build package: r6.2 (production Release)' -ForegroundColor Cyan
 Write-Host 'Configuring EB Recorder plugin...'
 $PluginConfigureArgs = @(
     '-S', $Root,
@@ -333,18 +335,24 @@ $PluginConfigureArgs = @(
 Invoke-CMake $PluginConfigureArgs 'EB Recorder configure failed.'
 
 Write-Host 'Building EB Recorder...'
-$PluginBuildArgs = @('--build', $PluginBuild, '--config', 'RelWithDebInfo', '--parallel')
+$PluginBuildArgs = @('--build', $PluginBuild, '--config', 'Release', '--parallel')
 Invoke-CMake $PluginBuildArgs 'EB Recorder build failed.'
 
 Remove-Item $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host 'Creating staged plugin layout...'
-$PluginInstallArgs = @('--install', $PluginBuild, '--config', 'RelWithDebInfo', '--prefix', $StagingDir)
+$PluginInstallArgs = @('--install', $PluginBuild, '--config', 'Release', '--prefix', $StagingDir)
 Invoke-CMake $PluginInstallArgs 'EB Recorder install failed.'
 
 $PluginStaging = Join-Path $StagingDir 'eb-recorder'
 $BuiltDll = Join-Path $PluginStaging 'bin\64bit\eb-recorder.dll'
 if (-not (Test-Path $BuiltDll)) {
     throw "Built DLL was not found at '$BuiltDll'."
+}
+
+$UnexpectedPdb = Get-ChildItem $PluginStaging -Recurse -File -Filter '*.pdb' -ErrorAction SilentlyContinue
+if ($UnexpectedPdb) {
+    $PdbList = ($UnexpectedPdb | ForEach-Object { $_.FullName }) -join [Environment]::NewLine
+    throw "Production staging unexpectedly contains PDB files:`n$PdbList"
 }
 
 Remove-Item $DistDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -355,11 +363,17 @@ Copy-Item (Join-Path $Root 'UNINSTALL.cmd') $DistDir -Force
 Copy-Item (Join-Path $Root 'scripts\install.ps1') $DistDir -Force
 Copy-Item (Join-Path $Root 'scripts\uninstall.ps1') $DistDir -Force
 
-$ZipPath = Join-Path $Root 'EBRecorder-0.3.0-windows-x64.zip'
+$ZipPath = Join-Path $Root 'EBRecorder-v0.3.0-Windows-x64.zip'
 Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $DistDir '*') -DestinationPath $ZipPath -CompressionLevel Optimal
+
+$ReleaseSha256 = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$ShaPath = "$ZipPath.sha256"
+[IO.File]::WriteAllText($ShaPath, "$ReleaseSha256  $([IO.Path]::GetFileName($ZipPath))`r`n", (New-Object Text.UTF8Encoding($false)))
 
 Write-Host ''
 Write-Host 'Build complete.' -ForegroundColor Green
 Write-Host "Release archive: $ZipPath"
+Write-Host "SHA256:          $ReleaseSha256"
+Write-Host "Checksum file:   $ShaPath"
 Write-Host 'Install by extracting the release archive and running INSTALL.cmd.'

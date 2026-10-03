@@ -16,6 +16,7 @@ First public baseline.
 - Automatic-start polling is lazy and stops after success.
 - No display/VRR/G-SYNC configuration APIs are used.
 - Improved dependency download retry/integrity diagnostics.
+- Production Windows package now builds the plugin as CMake `Release`, excludes PDB/debug-symbol files, and emits a SHA-256 sidecar for the release asset.
 
 ## 0.2.1
 

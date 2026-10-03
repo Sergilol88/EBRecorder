@@ -36,12 +36,6 @@ install(
   LIBRARY DESTINATION "eb-recorder/bin/64bit"
   ARCHIVE DESTINATION "eb-recorder/bin/64bit"
 )
-install(
-  FILES "$<TARGET_PDB_FILE:eb-recorder>"
-  CONFIGURATIONS RelWithDebInfo
-  DESTINATION "eb-recorder/bin/64bit"
-  OPTIONAL
-)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION "eb-recorder/data")
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" DESTINATION "eb-recorder")

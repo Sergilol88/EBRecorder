@@ -62,9 +62,45 @@ The installer uses this isolated OBS plugin directory:
 C:\ProgramData\obs-studio\plugins\eb-recorder\
 ```
 
+It does not depend on the OBS installation folder, so regular OBS installations and Steam installations can be located on any drive.
+
 It does not create registry entries, services, scheduled tasks or PATH changes.
 
 To remove EB Recorder, close OBS and run `UNINSTALL.cmd` from the extracted release package.
+
+### Portable OBS installation
+
+`INSTALL.cmd` is intended for regular and Steam installations. If OBS is running in portable mode, install EB Recorder manually into the portable OBS folder.
+
+From the extracted EB Recorder release package:
+
+1. Copy `eb-recorder\bin\64bit\eb-recorder.dll` to:
+
+```text
+<OBS Portable>\obs-plugins\64bit\eb-recorder.dll
+```
+
+2. Create this folder if it does not already exist:
+
+```text
+<OBS Portable>\data\obs-plugins\eb-recorder\locale\
+```
+
+3. Copy `en-US.ini` and `ru-RU.ini` from `eb-recorder\data\locale\` into that `locale` folder.
+4. Start the portable OBS build and open **Tools -> EB Recorder**.
+
+The resulting portable layout should look like this:
+
+```text
+<OBS Portable>\
+├─ bin\64bit\obs64.exe
+├─ obs-plugins\64bit\eb-recorder.dll
+└─ data\obs-plugins\eb-recorder\locale\
+   ├─ en-US.ini
+   └─ ru-RU.ini
+```
+
+For portable installations, removal is also manual: close OBS and delete the EB Recorder DLL and its `data\obs-plugins\eb-recorder` folder.
 
 ## Usage
 

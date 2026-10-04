@@ -37,5 +37,5 @@ install(
   ARCHIVE DESTINATION "eb-recorder/bin/64bit"
 )
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION "eb-recorder/data")
-
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" DESTINATION "eb-recorder")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION "eb-recorder")

@@ -27,6 +27,7 @@ No extra video encoder is created by EB Recorder.
 - Records only the highest-resolution active Twitch Enhanced Broadcasting rendition.
 - Reuses the existing EB video encoder instead of creating another one.
 - Lets you record the existing EB **Live**, **VOD**, or **Live + VOD** AAC audio encoder(s).
+- Disables VOD-dependent choices when the current OBS output configuration cannot create a separate Twitch VOD track, and safely falls back to Live if a previously saved VOD choice becomes unavailable.
 - Reuses those audio encoders too; selecting two tracks does not create another audio encode.
 - Writes Matroska (`.mkv`) files to the current OBS recording directory.
 - After a clean stop, writes Matroska `BPS` technical tags for the recorded audio track(s), using the bitrate configured on the reused EB encoder(s), without remuxing or re-encoding the file.

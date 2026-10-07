@@ -75,10 +75,7 @@ struct EncoderInfo {
 };
 
 struct AudioEncoderInfo {
-	std::string name;
-	std::string codec;
 	int64_t bitrate = 0;
-	bool present = false;
 	bool active = false;
 };
 
@@ -355,21 +352,17 @@ QString makeSignature(const std::vector<EncoderInfo> &encoders, const EncoderInf
 AudioEncoderInfo getAudioEncoderInfo(const char *name)
 {
 	AudioEncoderInfo info;
-	info.name = name ? name : "";
-
 	obs_encoder_t *audio = name ? obs_get_encoder_by_name(name) : nullptr;
 	if (!audio)
 		return info;
 
-	info.present = true;
 	info.active = obs_encoder_active(audio);
-	const char *codec = obs_encoder_get_codec(audio);
-	info.codec = codec ? codec : "unknown";
-
-	obs_data_t *settings = obs_encoder_get_settings(audio);
-	if (settings) {
-		info.bitrate = obs_data_get_int(settings, "bitrate");
-		obs_data_release(settings);
+	if (info.active) {
+		obs_data_t *settings = obs_encoder_get_settings(audio);
+		if (settings) {
+			info.bitrate = obs_data_get_int(settings, "bitrate");
+			obs_data_release(settings);
+		}
 	}
 
 	obs_encoder_release(audio);
@@ -384,9 +377,6 @@ struct EbAudioState {
 struct VodTrackConfigState {
 	bool known = false;
 	bool configured = false;
-	bool enabledFlag = false;
-	bool distinctTracks = true;
-	bool advancedOutput = false;
 	int liveTrack = 0;
 	int vodTrack = 0;
 };
@@ -408,21 +398,22 @@ VodTrackConfigState getObsVodTrackConfigState()
 		return state;
 
 	state.known = true;
-	state.advancedOutput = std::strcmp(mode, "Advanced") == 0;
+	const bool advancedOutput = std::strcmp(mode, "Advanced") == 0;
 
-	if (state.advancedOutput) {
-		state.enabledFlag = config_get_bool(config, "AdvOut", "VodTrackEnabled");
+	if (advancedOutput) {
+		const bool enabled = config_get_bool(config, "AdvOut", "VodTrackEnabled");
 		state.liveTrack = static_cast<int>(config_get_int(config, "AdvOut", "TrackIndex"));
 		state.vodTrack = static_cast<int>(config_get_int(config, "AdvOut", "VodTrackIndex"));
-		state.distinctTracks = state.liveTrack > 0 && state.vodTrack > 0 && state.liveTrack != state.vodTrack;
-		state.configured = state.enabledFlag && state.distinctTracks;
+		const bool distinctTracks =
+			state.liveTrack > 0 && state.vodTrack > 0 && state.liveTrack != state.vodTrack;
+		state.configured = enabled && distinctTracks;
 	} else {
 		// This mirrors OBS SimpleOutput::IsVodTrackEnabled() apart from the
 		// service capability check. EB Recorder is only useful with Twitch EB;
 		// once streaming starts, the real VOD encoder remains the final truth.
 		const bool simpleAdvanced = config_get_bool(config, "SimpleOutput", "UseAdvanced");
-		state.enabledFlag = config_get_bool(config, "SimpleOutput", "VodTrackEnabled");
-		state.configured = simpleAdvanced && state.enabledFlag;
+		const bool enabled = config_get_bool(config, "SimpleOutput", "VodTrackEnabled");
+		state.configured = simpleAdvanced && enabled;
 	}
 
 	return state;
@@ -616,6 +607,8 @@ bool readEbmlElementHeader(const QByteArray &data, quint64 offset, EbmlElement &
 	const quint64 size = rawSize & valueMask;
 	const bool unknownSize = size == valueMask;
 	const quint64 payloadStart = sizeOffset + static_cast<quint64>(sizeLength);
+	if (!unknownSize && size > UINT64_MAX - payloadStart)
+		return false;
 
 	element.id = id;
 	element.size = size;
@@ -1127,9 +1120,9 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 	     audioSelectionKey(g_audioSelection).toUtf8().constData(), static_cast<int>(audioEncoders.size()));
 	for (size_t i = 0; i < audioEncoders.size(); ++i) {
 		const auto &entry = audioEncoders[i];
+		const char *codec = obs_encoder_get_codec(entry.encoder);
 		blog(LOG_INFO, "[EB Recorder] audio encoder %zu acquired: %p name='%s' codec=%s bitrate=%lld kbps", i,
-		     static_cast<void *>(entry.encoder), entry.name,
-		     obs_encoder_get_codec(entry.encoder) ? obs_encoder_get_codec(entry.encoder) : "unknown",
+		     static_cast<void *>(entry.encoder), entry.name, codec ? codec : "unknown",
 		     static_cast<long long>(entry.bitrateKbps));
 	}
 
@@ -1583,6 +1576,11 @@ public:
 private:
 	void updateAudioSelectionChoices(bool vodSelectable)
 	{
+		const int state = vodSelectable ? 1 : 0;
+		if (lastVodSelectable_ == state)
+			return;
+		lastVodSelectable_ = state;
+
 		auto *model = qobject_cast<QStandardItemModel *>(audioSelectionCombo_->model());
 		if (model) {
 			if (auto *vodItem = model->item(static_cast<int>(AudioSelection::Vod)))
@@ -1797,6 +1795,7 @@ private:
 	QString lastEncoderUiSignature_;
 	QString lastRecordingUiSignature_;
 	QString lastLogSignature_;
+	int lastVodSelectable_ = -1;
 };
 
 QPointer<EBRecorderDialog> g_dialog;

@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$PluginVersion = '0.3.0'
+$PluginVersion = '0.3.1'
 $BuildRevision = 'r6.3'
 
 if (Get-Process obs64 -ErrorAction SilentlyContinue) {

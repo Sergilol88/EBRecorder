@@ -322,7 +322,7 @@ if (-not (Test-Path $ObsDepsPrefix)) {
 $PrefixPath = "$ObsSdk;$ObsDepsPrefix;$QtPrefix"
 
 Write-Host ''
-Write-Host 'EB Recorder build package: r6.2 (production Release)' -ForegroundColor Cyan
+Write-Host 'EB Recorder build package: r6.3 (production Release)' -ForegroundColor Cyan
 Write-Host 'Configuring EB Recorder plugin...'
 $PluginConfigureArgs = @(
     '-S', $Root,

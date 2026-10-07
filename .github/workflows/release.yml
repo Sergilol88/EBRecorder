@@ -79,7 +79,7 @@ jobs:
         run: |
           $Tag = "v$env:PLUGIN_VERSION"
 
-          gh release view $Tag --repo $env:GITHUB_REPOSITORY *> $null
+          cmd.exe /d /c "gh release view $Tag --repo $env:GITHUB_REPOSITORY >nul 2>&1"
           if ($LASTEXITCODE -eq 0) {
             Write-Host "Release $Tag already exists; leaving it unchanged."
             exit 0

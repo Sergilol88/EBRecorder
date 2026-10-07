@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](release-notes/v0.3.1.md)
+
+Audio-track and metadata update.
+
+- Added selectable reuse of the existing EB **Live**, **VOD**, or **Live + VOD** AAC encoders.
+- VOD-dependent choices now follow the current OBS output configuration and safely fall back to Live when a separate Twitch VOD track is unavailable.
+- Added per-track Matroska `BPS` metadata after clean stops so Windows Explorer and compatible metadata readers can display AAC bitrate.
+- Kept the zero-extra-encoder architecture: EB Recorder still creates no video or audio encoder.
+- Fixed source-tree `INSTALL.cmd` / `UNINSTALL.cmd` handling after local builds.
+- Reduced unnecessary diagnostics UI work and hardened Matroska metadata parsing/finalization.
+- Release archive naming now follows `VERSION.txt`.
+
 ## [0.3.0](release-notes/v0.3.0.md)
 
 First public baseline.
@@ -8,9 +20,7 @@ First public baseline.
 - Automatic start works with the EB Recorder dialog closed.
 - Manual stop suppresses another automatic restart during the same stream session.
 - Kept TOP-only reuse of the existing Twitch EB video encoder.
-- Added selectable reuse of the existing EB Live, VOD, or Live + VOD AAC encoders.
-- VOD-dependent choices now follow the current OBS output configuration and fall back to Live when a separate Twitch VOD track is unavailable.
-- Added per-track Matroska `BPS` metadata after clean stops so audio bitrate is visible to metadata readers such as Windows Explorer.
+- Kept reuse of the existing EB live AAC encoder.
 - MKV recording through OBS `ffmpeg_muxer`.
 - Matroska `cluster_time_limit=1000` for crash-resilient output.
 - Local recording stops before EB encoder teardown.

@@ -183,7 +183,7 @@ Please use GitHub Issues. Include:
 
 ## Project status
 
-`v0.3.0` is the first feature-complete public baseline: TOP-only encoder reuse, MKV output, crash-resilient recording, manual controls and optional automatic start with the EB stream.
+`v0.3.0` is the first feature-complete public baseline. The current release, **v0.3.1**, adds selectable EB Live/VOD audio reuse, VOD-aware UI, and per-track Matroska bitrate metadata while keeping the zero-extra-encoder architecture.
 
 ## License
 

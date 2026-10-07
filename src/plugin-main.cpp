@@ -823,8 +823,8 @@ bool applyMatroskaAudioBitrateMetadata(const QString &path, const std::vector<in
 	}
 	if (audioTrackUids.size() != bitratesBps.size()) {
 		detail = QStringLiteral("Matroska audio track count (%1) does not match recorded EB audio encoder count (%2)")
-				 .arg(audioTrackUids.size())
-				 .arg(bitratesBps.size());
+				 .arg(static_cast<qulonglong>(audioTrackUids.size()))
+				 .arg(static_cast<qulonglong>(bitratesBps.size()));
 		return false;
 	}
 
@@ -879,13 +879,9 @@ bool applyMatroskaAudioBitrateMetadata(const QString &path, const std::vector<in
 
 	const QByteArray originalSeekRegion =
 		header.mid(static_cast<qsizetype>(seekHead.start), static_cast<qsizetype>(reservedSpan));
-	bool segmentSizeUpdated = false;
-	bool seekRegionUpdated = false;
-
 	auto rollback = [&]() {
-		if (seekRegionUpdated)
-			writeExact(file, seekHead.start, originalSeekRegion);
-		if (segmentSizeUpdated)
+		writeExact(file, seekHead.start, originalSeekRegion);
+		if (!segment.unknownSize)
 			writeExact(file, segment.start + static_cast<quint64>(segment.idLength), originalSegmentSize);
 		file.resize(static_cast<qint64>(originalFileSize));
 		file.flush();
@@ -903,7 +899,6 @@ bool applyMatroskaAudioBitrateMetadata(const QString &path, const std::vector<in
 			detail = QStringLiteral("could not extend Matroska Segment size");
 			return false;
 		}
-		segmentSizeUpdated = true;
 	}
 
 	if (!writeExact(file, seekHead.start, newSeekRegion)) {
@@ -911,7 +906,6 @@ bool applyMatroskaAudioBitrateMetadata(const QString &path, const std::vector<in
 		detail = QStringLiteral("could not update Matroska SeekHead");
 		return false;
 	}
-	seekRegionUpdated = true;
 
 	if (!file.flush()) {
 		rollback();
@@ -919,7 +913,8 @@ bool applyMatroskaAudioBitrateMetadata(const QString &path, const std::vector<in
 		return false;
 	}
 
-	detail = QStringLiteral("wrote BPS tags for %1 audio track(s)").arg(bitratesBps.size());
+	detail = QStringLiteral("wrote BPS tags for %1 audio track(s)")
+			 .arg(static_cast<qulonglong>(bitratesBps.size()));
 	return true;
 }
 
@@ -1184,7 +1179,7 @@ void initializeSettingsPath()
 {
 	char *path = obs_module_config_path("settings.ini");
 	if (!path) {
-		blog(LOG_WARNING, "[EB Recorder] plugin settings path is unavailable; automatic-record setting will not persist");
+		blog(LOG_WARNING, "[EB Recorder] plugin settings path is unavailable; plugin settings will not persist");
 		return;
 	}
 
@@ -1506,6 +1501,8 @@ private:
 		if (active && g_recordingUiState != RecordingUiState::Stopping)
 			g_recordingUiState = RecordingUiState::Recording;
 
+		audioSelectionCombo_->setEnabled(!active);
+
 		if (!active && g_autoStartPending) {
 			recordingLabel_->setText(ebTr("EBRecorder.Recording.AutoPending"));
 			startButton_->setEnabled(topAvailable && audioAvailable);
@@ -1536,7 +1533,6 @@ private:
 
 		startButton_->setEnabled(!active && topAvailable && audioAvailable);
 		stopButton_->setEnabled(active);
-		audioSelectionCombo_->setEnabled(!active);
 	}
 
 	void refreshEncoders(bool forceLog)

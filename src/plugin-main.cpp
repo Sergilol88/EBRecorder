@@ -9,10 +9,12 @@
 #include <QAbstractItemView>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDir>
 #include <QFont>
+#include <QFile>
 #include <QFileInfo>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -44,7 +46,8 @@ OBS_MODULE_USE_DEFAULT_LOCALE("eb-recorder", "en-US")
 namespace {
 constexpr const char *kVersion = "0.3.0";
 constexpr const char *kEbEncoderPrefix = "multitrack video video encoder ";
-constexpr const char *kEbAudioEncoderName = "multitrack video live audio 0";
+constexpr const char *kEbLiveAudioEncoderName = "multitrack video live audio 0";
+constexpr const char *kEbVodAudioEncoderName = "multitrack video vod audio 0";
 constexpr const char *kLocalOutputName = "eb-recorder local output";
 constexpr const char *kLocalOutputType = "ffmpeg_muxer";
 // Keep Matroska clusters short so an interrupted session leaves only a small
@@ -57,6 +60,7 @@ constexpr const char *kMuxerSettings = "cluster_time_limit=1000";
 constexpr int kAutoStartRetryMs = 500;
 constexpr int kAutoStartTimeoutMs = 15000;
 constexpr int kDialogRefreshMs = 1000;
+constexpr qint64 kMatroskaHeaderScanBytes = 2 * 1024 * 1024;
 
 struct EncoderInfo {
 	int index = -1;
@@ -66,6 +70,20 @@ struct EncoderInfo {
 	uint32_t height = 0;
 	int64_t bitrate = 0;
 	bool active = false;
+};
+
+struct AudioEncoderInfo {
+	std::string name;
+	std::string codec;
+	int64_t bitrate = 0;
+	bool present = false;
+	bool active = false;
+};
+
+enum class AudioSelection {
+	Live = 0,
+	Vod = 1,
+	Both = 2,
 };
 
 enum class RecordingUiState {
@@ -85,6 +103,10 @@ bool g_obsExiting = false;
 
 QString g_settingsPath;
 bool g_autoRecordEnabled = false;
+AudioSelection g_audioSelection = AudioSelection::Live;
+std::vector<int64_t> g_recordingAudioBitratesBps;
+bool g_audioBitrateMetadataPending = false;
+bool g_cleanStopRequested = false;
 bool g_autoStartPending = false;
 qint64 g_autoStartDeadlineMs = 0;
 QTimer *g_autoStartTimer = nullptr;
@@ -113,8 +135,18 @@ QString fallbackText(const char *key)
 		{"EBRecorder.Selected.None", "Top EB stream: not available.", "Верхний EB-поток: недоступен."},
 		{"EBRecorder.Selected.Found", "Top EB stream: encoder %1 — %2, %3×%4, %5 kbps.",
 		 "Верхний EB-поток: кодировщик %1 — %2, %3×%4, %5 кбит/с."},
-		{"EBRecorder.Audio.Ready", "EB audio: %1 is active.", "EB-аудио: %1 активно."},
-		{"EBRecorder.Audio.Missing", "EB audio: %1 is not active yet.", "EB-аудио: %1 пока не активно."},
+		{"EBRecorder.Audio.Status", "EB audio — Live: %1; VOD: %2. Recording selection: %3.",
+		 "EB-аудио — Live: %1; VOD: %2. Для записи выбрано: %3."},
+		{"EBRecorder.Audio.ActiveWithBitrate", "active, %1 kbps", "активно, %1 кбит/с"},
+		{"EBRecorder.Audio.Active", "active", "активно"},
+		{"EBRecorder.Audio.Inactive", "not active", "не активно"},
+		{"EBRecorder.AudioSelection", "Audio tracks", "Аудиодорожки"},
+		{"EBRecorder.AudioSelection.Live", "Live", "Live"},
+		{"EBRecorder.AudioSelection.Vod", "VOD", "VOD"},
+		{"EBRecorder.AudioSelection.Both", "Live + VOD", "Live + VOD"},
+		{"EBRecorder.AudioSelection.Tooltip",
+		 "Choose which existing Enhanced Broadcasting audio encoder(s) are reused in the local MKV. VOD requires OBS/Twitch VOD Track to expose the VOD EB encoder. Changing this option affects the next recording.",
+		 "Выбери, какие уже работающие аудиокодировщики Enhanced Broadcasting использовать в локальном MKV. Для VOD OBS/Twitch должен создать отдельный VOD-кодировщик. Изменение применяется к следующей записи."},
 		{"EBRecorder.Recording.Idle", "Local EB recording: stopped.", "Локальная EB-запись: остановлена."},
 		{"EBRecorder.Recording.Active", "Local EB recording: RECORDING → %1",
 		 "Локальная EB-запись: ИДЁТ → %1"},
@@ -135,8 +167,8 @@ QString fallbackText(const char *key)
 		 "Локальная EB-запись уже активна."},
 		{"EBRecorder.Error.NoTop", "No active TOP EB video encoder is available.",
 		 "Нет активного верхнего EB-видеокодировщика."},
-		{"EBRecorder.Error.NoAudio", "The active EB audio encoder was not found.",
-		 "Активный EB-аудиокодировщик не найден."},
+		{"EBRecorder.Error.NoAudio", "Required EB audio track(s) are not active for the selected mode: %1.",
+		 "Для выбранного режима не активны необходимые EB-аудиодорожки: %1."},
 		{"EBRecorder.Error.OutputCreate", "Could not create the Matroska recording output.", "Не удалось создать Matroska output для записи."},
 		{"EBRecorder.Error.AttachReuse", "OBS did not attach the existing EB encoder objects to the local output.",
 		 "OBS не подключил существующие EB-кодировщики к локальному output."},
@@ -313,15 +345,103 @@ QString makeSignature(const std::vector<EncoderInfo> &encoders, const EncoderInf
 	return parts.join('|');
 }
 
-bool ebAudioEncoderActive()
+AudioEncoderInfo getAudioEncoderInfo(const char *name)
 {
-	obs_encoder_t *audio = obs_get_encoder_by_name(kEbAudioEncoderName);
-	if (!audio)
-		return false;
+	AudioEncoderInfo info;
+	info.name = name ? name : "";
 
-	const bool active = obs_encoder_active(audio);
+	obs_encoder_t *audio = name ? obs_get_encoder_by_name(name) : nullptr;
+	if (!audio)
+		return info;
+
+	info.present = true;
+	info.active = obs_encoder_active(audio);
+	const char *codec = obs_encoder_get_codec(audio);
+	info.codec = codec ? codec : "unknown";
+
+	obs_data_t *settings = obs_encoder_get_settings(audio);
+	if (settings) {
+		info.bitrate = obs_data_get_int(settings, "bitrate");
+		obs_data_release(settings);
+	}
+
 	obs_encoder_release(audio);
-	return active;
+	return info;
+}
+
+struct EbAudioState {
+	AudioEncoderInfo live;
+	AudioEncoderInfo vod;
+};
+
+EbAudioState getEbAudioState()
+{
+	return {getAudioEncoderInfo(kEbLiveAudioEncoderName), getAudioEncoderInfo(kEbVodAudioEncoderName)};
+}
+
+QString audioSelectionKey(AudioSelection selection)
+{
+	switch (selection) {
+	case AudioSelection::Vod:
+		return QStringLiteral("vod");
+	case AudioSelection::Both:
+		return QStringLiteral("both");
+	case AudioSelection::Live:
+	default:
+		return QStringLiteral("live");
+	}
+}
+
+AudioSelection audioSelectionFromKey(const QString &key)
+{
+	if (key.compare(QStringLiteral("vod"), Qt::CaseInsensitive) == 0)
+		return AudioSelection::Vod;
+	if (key.compare(QStringLiteral("both"), Qt::CaseInsensitive) == 0)
+		return AudioSelection::Both;
+	return AudioSelection::Live;
+}
+
+QString audioSelectionLabel(AudioSelection selection)
+{
+	switch (selection) {
+	case AudioSelection::Vod:
+		return ebTr("EBRecorder.AudioSelection.Vod");
+	case AudioSelection::Both:
+		return ebTr("EBRecorder.AudioSelection.Both");
+	case AudioSelection::Live:
+	default:
+		return ebTr("EBRecorder.AudioSelection.Live");
+	}
+}
+
+bool selectedAudioReady(const EbAudioState &audio)
+{
+	switch (g_audioSelection) {
+	case AudioSelection::Vod:
+		return audio.vod.active;
+	case AudioSelection::Both:
+		return audio.live.active && audio.vod.active;
+	case AudioSelection::Live:
+	default:
+		return audio.live.active;
+	}
+}
+
+QString formatAudioEncoderState(const AudioEncoderInfo &audio)
+{
+	if (!audio.active)
+		return ebTr("EBRecorder.Audio.Inactive");
+	if (audio.bitrate > 0)
+		return ebTr("EBRecorder.Audio.ActiveWithBitrate").arg(audio.bitrate);
+	return ebTr("EBRecorder.Audio.Active");
+}
+
+QString formatAudioStatus(const EbAudioState &audio)
+{
+	return ebTr("EBRecorder.Audio.Status")
+		.arg(formatAudioEncoderState(audio.live))
+		.arg(formatAudioEncoderState(audio.vod))
+		.arg(audioSelectionLabel(g_audioSelection));
 }
 
 QString obsRecordingDirectory()
@@ -367,6 +487,442 @@ QString makeRecordingPath()
 	return QDir::toNativeSeparators(candidate);
 }
 
+struct EbmlElement {
+	quint64 id = 0;
+	quint64 size = 0;
+	quint64 start = 0;
+	quint64 payloadStart = 0;
+	quint64 end = 0;
+	int idLength = 0;
+	int sizeLength = 0;
+	bool unknownSize = false;
+};
+
+int ebmlVintLength(uint8_t first)
+{
+	uint8_t mask = 0x80;
+	for (int length = 1; length <= 8; ++length, mask >>= 1) {
+		if (first & mask)
+			return length;
+	}
+	return 0;
+}
+
+bool readEbmlElementHeader(const QByteArray &data, quint64 offset, EbmlElement &element)
+{
+	const quint64 dataSize = static_cast<quint64>(data.size());
+	if (offset >= dataSize)
+		return false;
+
+	const auto byteAt = [&data](quint64 index) {
+		return static_cast<uint8_t>(data.at(static_cast<qsizetype>(index)));
+	};
+
+	const int idLength = ebmlVintLength(byteAt(offset));
+	if (idLength <= 0 || idLength > 4 || offset + static_cast<quint64>(idLength) > dataSize)
+		return false;
+
+	quint64 id = 0;
+	for (int i = 0; i < idLength; ++i)
+		id = (id << 8) | byteAt(offset + static_cast<quint64>(i));
+
+	const quint64 sizeOffset = offset + static_cast<quint64>(idLength);
+	if (sizeOffset >= dataSize)
+		return false;
+	const int sizeLength = ebmlVintLength(byteAt(sizeOffset));
+	if (sizeLength <= 0 || sizeOffset + static_cast<quint64>(sizeLength) > dataSize)
+		return false;
+
+	quint64 rawSize = 0;
+	for (int i = 0; i < sizeLength; ++i)
+		rawSize = (rawSize << 8) | byteAt(sizeOffset + static_cast<quint64>(i));
+	const quint64 valueMask = (quint64{1} << (7 * sizeLength)) - 1;
+	const quint64 size = rawSize & valueMask;
+	const bool unknownSize = size == valueMask;
+	const quint64 payloadStart = sizeOffset + static_cast<quint64>(sizeLength);
+
+	element.id = id;
+	element.size = size;
+	element.start = offset;
+	element.payloadStart = payloadStart;
+	element.end = unknownSize ? UINT64_MAX : payloadStart + size;
+	element.idLength = idLength;
+	element.sizeLength = sizeLength;
+	element.unknownSize = unknownSize;
+	return !unknownSize || element.end >= element.payloadStart;
+}
+
+QByteArray encodeEbmlId(quint64 id)
+{
+	int width = 1;
+	while (width < 8 && id >= (quint64{1} << (8 * width)))
+		++width;
+
+	QByteArray out(width, '\0');
+	for (int i = width - 1; i >= 0; --i) {
+		out[i] = static_cast<char>(id & 0xFF);
+		id >>= 8;
+	}
+	return out;
+}
+
+QByteArray encodeEbmlSize(quint64 value, int requestedWidth = 0)
+{
+	int width = requestedWidth;
+	if (width == 0) {
+		for (width = 1; width <= 8; ++width) {
+			const quint64 marker = quint64{1} << (7 * width);
+			if (value < marker - 1)
+				break;
+		}
+	}
+
+	if (width < 1 || width > 8)
+		return {};
+	const quint64 marker = quint64{1} << (7 * width);
+	if (value >= marker - 1)
+		return {};
+
+	quint64 raw = marker | value;
+	QByteArray out(width, '\0');
+	for (int i = width - 1; i >= 0; --i) {
+		out[i] = static_cast<char>(raw & 0xFF);
+		raw >>= 8;
+	}
+	return out;
+}
+
+QByteArray encodeEbmlUInt(quint64 value)
+{
+	int width = 1;
+	while (width < 8 && value >= (quint64{1} << (8 * width)))
+		++width;
+
+	QByteArray out(width, '\0');
+	for (int i = width - 1; i >= 0; --i) {
+		out[i] = static_cast<char>(value & 0xFF);
+		value >>= 8;
+	}
+	return out;
+}
+
+QByteArray makeEbmlElement(quint64 id, const QByteArray &payload, int sizeWidth = 0)
+{
+	const QByteArray size = encodeEbmlSize(static_cast<quint64>(payload.size()), sizeWidth);
+	if (size.isEmpty())
+		return {};
+	return encodeEbmlId(id) + size + payload;
+}
+
+QByteArray makeEbmlVoid(quint64 totalBytes)
+{
+	if (totalBytes == 0)
+		return {};
+
+	for (int sizeWidth = 1; sizeWidth <= 8; ++sizeWidth) {
+		if (totalBytes < static_cast<quint64>(1 + sizeWidth))
+			continue;
+		const quint64 payloadSize = totalBytes - static_cast<quint64>(1 + sizeWidth);
+		const QByteArray encodedSize = encodeEbmlSize(payloadSize, sizeWidth);
+		if (encodedSize.isEmpty())
+			continue;
+		QByteArray result;
+		result.reserve(static_cast<qsizetype>(totalBytes));
+		result.append(static_cast<char>(0xEC));
+		result.append(encodedSize);
+		result.append(QByteArray(static_cast<qsizetype>(payloadSize), '\0'));
+		return result;
+	}
+	return {};
+}
+
+bool collectAudioTrackUids(const QByteArray &header, const EbmlElement &tracks,
+			   std::vector<QByteArray> &audioTrackUids)
+{
+	if (tracks.unknownSize || tracks.end > static_cast<quint64>(header.size()))
+		return false;
+
+	quint64 cursor = tracks.payloadStart;
+	while (cursor < tracks.end) {
+		EbmlElement trackEntry;
+		if (!readEbmlElementHeader(header, cursor, trackEntry) || trackEntry.unknownSize ||
+		    trackEntry.end > tracks.end || trackEntry.end > static_cast<quint64>(header.size()))
+			return false;
+
+		if (trackEntry.id == 0xAE) {
+			QByteArray uid;
+			quint64 trackType = 0;
+			quint64 childCursor = trackEntry.payloadStart;
+			while (childCursor < trackEntry.end) {
+				EbmlElement child;
+				if (!readEbmlElementHeader(header, childCursor, child) || child.unknownSize ||
+				    child.end > trackEntry.end || child.end > static_cast<quint64>(header.size()))
+					return false;
+
+				if (child.id == 0x73C5) {
+					uid = header.mid(static_cast<qsizetype>(child.payloadStart),
+							 static_cast<qsizetype>(child.size));
+				} else if (child.id == 0x83) {
+					for (quint64 i = 0; i < child.size; ++i) {
+						trackType = (trackType << 8) |
+							static_cast<uint8_t>(header.at(static_cast<qsizetype>(child.payloadStart + i)));
+					}
+				}
+				childCursor = child.end;
+			}
+
+			if (trackType == 2 && !uid.isEmpty())
+				audioTrackUids.push_back(uid);
+		}
+
+		cursor = trackEntry.end;
+	}
+	return true;
+}
+
+QByteArray buildBpsTags(const std::vector<QByteArray> &audioTrackUids,
+			const std::vector<int64_t> &bitratesBps)
+{
+	if (audioTrackUids.size() != bitratesBps.size())
+		return {};
+
+	QByteArray tagsPayload;
+	for (size_t i = 0; i < audioTrackUids.size(); ++i) {
+		if (bitratesBps[i] <= 0)
+			continue;
+
+		const QByteArray targets = makeEbmlElement(0x63C5, audioTrackUids[i]);
+		const QByteArray simpleTagPayload =
+			makeEbmlElement(0x45A3, QByteArrayLiteral("BPS")) +
+			makeEbmlElement(0x4487, QByteArray::number(bitratesBps[i]));
+		const QByteArray tagPayload = makeEbmlElement(0x63C0, targets) +
+					      makeEbmlElement(0x67C8, simpleTagPayload);
+		tagsPayload += makeEbmlElement(0x7373, tagPayload);
+	}
+
+	return tagsPayload.isEmpty() ? QByteArray() : makeEbmlElement(0x1254C367, tagsPayload);
+}
+
+bool fitSeekHeadIntoReservedSpan(const QByteArray &seekPayload, quint64 spanBytes, QByteArray &region)
+{
+	for (int sizeWidth = 1; sizeWidth <= 8; ++sizeWidth) {
+		const QByteArray seekHead = makeEbmlElement(0x114D9B74, seekPayload, sizeWidth);
+		if (seekHead.isEmpty() || static_cast<quint64>(seekHead.size()) > spanBytes)
+			continue;
+
+		const quint64 remaining = spanBytes - static_cast<quint64>(seekHead.size());
+		QByteArray padding;
+		if (remaining > 0) {
+			padding = makeEbmlVoid(remaining);
+			if (padding.isEmpty())
+				continue;
+		}
+
+		region = seekHead + padding;
+		return static_cast<quint64>(region.size()) == spanBytes;
+	}
+	return false;
+}
+
+bool writeExact(QFile &file, quint64 offset, const QByteArray &data)
+{
+	return file.seek(static_cast<qint64>(offset)) && file.write(data) == data.size();
+}
+
+bool applyMatroskaAudioBitrateMetadata(const QString &path, const std::vector<int64_t> &bitratesBps,
+				       QString &detail)
+{
+	if (bitratesBps.empty()) {
+		detail = QStringLiteral("no audio bitrate values were captured");
+		return false;
+	}
+
+	QFile file(path);
+	if (!file.open(QIODevice::ReadWrite)) {
+		detail = QStringLiteral("could not open finalized MKV for metadata update");
+		return false;
+	}
+
+	const qint64 fileSizeSigned = file.size();
+	if (fileSizeSigned <= 0) {
+		detail = QStringLiteral("finalized MKV is empty");
+		return false;
+	}
+	const quint64 originalFileSize = static_cast<quint64>(fileSizeSigned);
+	const qint64 headerBytes = std::min<qint64>(fileSizeSigned, kMatroskaHeaderScanBytes);
+	const QByteArray header = file.read(headerBytes);
+	if (header.size() != headerBytes) {
+		detail = QStringLiteral("could not read Matroska header");
+		return false;
+	}
+
+	EbmlElement segment;
+	bool segmentFound = false;
+	quint64 cursor = 0;
+	while (cursor < static_cast<quint64>(header.size())) {
+		EbmlElement element;
+		if (!readEbmlElementHeader(header, cursor, element))
+			break;
+		if (element.id == 0x18538067) {
+			segment = element;
+			segmentFound = true;
+			break;
+		}
+		if (element.unknownSize || element.end > static_cast<quint64>(header.size()))
+			break;
+		cursor = element.end;
+	}
+	if (!segmentFound) {
+		detail = QStringLiteral("Matroska Segment element was not found");
+		return false;
+	}
+	if (!segment.unknownSize && segment.end != originalFileSize) {
+		detail = QStringLiteral("Matroska Segment does not end at EOF; refusing an in-place metadata update");
+		return false;
+	}
+
+	EbmlElement seekHead;
+	EbmlElement seekPadding;
+	EbmlElement tracks;
+	bool seekFound = false;
+	bool seekPaddingFound = false;
+	bool tracksFound = false;
+	cursor = segment.payloadStart;
+	while (cursor < static_cast<quint64>(header.size())) {
+		EbmlElement element;
+		if (!readEbmlElementHeader(header, cursor, element))
+			break;
+		if (element.id == 0x1F43B675)
+			break;
+		if (element.unknownSize || element.end > static_cast<quint64>(header.size()))
+			break;
+
+		if (element.id == 0x114D9B74 && !seekFound) {
+			seekHead = element;
+			seekFound = true;
+		} else if (seekFound && !seekPaddingFound && element.start == seekHead.end && element.id == 0xEC) {
+			seekPadding = element;
+			seekPaddingFound = true;
+		}
+		if (element.id == 0x1654AE6B && !tracksFound) {
+			tracks = element;
+			tracksFound = true;
+		}
+		cursor = element.end;
+	}
+
+	if (!seekFound || !seekPaddingFound || !tracksFound) {
+		detail = QStringLiteral("required Matroska SeekHead/metadata reserve/Tracks structure was not found");
+		return false;
+	}
+
+	std::vector<QByteArray> audioTrackUids;
+	if (!collectAudioTrackUids(header, tracks, audioTrackUids)) {
+		detail = QStringLiteral("could not parse Matroska audio TrackUID values");
+		return false;
+	}
+	if (audioTrackUids.size() != bitratesBps.size()) {
+		detail = QStringLiteral("Matroska audio track count (%1) does not match recorded EB audio encoder count (%2)")
+				 .arg(audioTrackUids.size())
+				 .arg(bitratesBps.size());
+		return false;
+	}
+
+	const QByteArray bpsTags = buildBpsTags(audioTrackUids, bitratesBps);
+	if (bpsTags.isEmpty()) {
+		detail = QStringLiteral("no positive audio bitrate values were available for BPS tags");
+		return false;
+	}
+
+	QByteArray seekPayload;
+	cursor = seekHead.payloadStart;
+	while (cursor < seekHead.end) {
+		EbmlElement child;
+		if (!readEbmlElementHeader(header, cursor, child) || child.unknownSize || child.end > seekHead.end) {
+			detail = QStringLiteral("could not parse Matroska SeekHead");
+			return false;
+		}
+		if (child.id != 0xBF) {
+			seekPayload += header.mid(static_cast<qsizetype>(child.start),
+						 static_cast<qsizetype>(child.end - child.start));
+		}
+		cursor = child.end;
+	}
+
+	const quint64 newTagsRelativePosition = originalFileSize - segment.payloadStart;
+	const QByteArray seekEntryPayload =
+		makeEbmlElement(0x53AB, encodeEbmlId(0x1254C367)) +
+		makeEbmlElement(0x53AC, encodeEbmlUInt(newTagsRelativePosition));
+	seekPayload += makeEbmlElement(0x4DBB, seekEntryPayload);
+
+	const quint64 reservedSpan = seekPadding.end - seekHead.start;
+	QByteArray newSeekRegion;
+	if (!fitSeekHeadIntoReservedSpan(seekPayload, reservedSpan, newSeekRegion)) {
+		detail = QStringLiteral("Matroska SeekHead reserve is too small for the audio bitrate metadata entry");
+		return false;
+	}
+
+	QByteArray newSegmentSize;
+	QByteArray originalSegmentSize;
+	if (!segment.unknownSize) {
+		if (segment.size > UINT64_MAX - static_cast<quint64>(bpsTags.size())) {
+			detail = QStringLiteral("Matroska Segment size overflow");
+			return false;
+		}
+		newSegmentSize = encodeEbmlSize(segment.size + static_cast<quint64>(bpsTags.size()), segment.sizeLength);
+		if (newSegmentSize.isEmpty()) {
+			detail = QStringLiteral("Matroska Segment size field cannot represent the metadata extension");
+			return false;
+		}
+		originalSegmentSize = header.mid(static_cast<qsizetype>(segment.start + segment.idLength), segment.sizeLength);
+	}
+
+	const QByteArray originalSeekRegion =
+		header.mid(static_cast<qsizetype>(seekHead.start), static_cast<qsizetype>(reservedSpan));
+	bool segmentSizeUpdated = false;
+	bool seekRegionUpdated = false;
+
+	auto rollback = [&]() {
+		if (seekRegionUpdated)
+			writeExact(file, seekHead.start, originalSeekRegion);
+		if (segmentSizeUpdated)
+			writeExact(file, segment.start + static_cast<quint64>(segment.idLength), originalSegmentSize);
+		file.resize(static_cast<qint64>(originalFileSize));
+		file.flush();
+	};
+
+	if (!writeExact(file, originalFileSize, bpsTags)) {
+		file.resize(static_cast<qint64>(originalFileSize));
+		detail = QStringLiteral("could not append Matroska BPS tags");
+		return false;
+	}
+
+	if (!segment.unknownSize) {
+		if (!writeExact(file, segment.start + static_cast<quint64>(segment.idLength), newSegmentSize)) {
+			rollback();
+			detail = QStringLiteral("could not extend Matroska Segment size");
+			return false;
+		}
+		segmentSizeUpdated = true;
+	}
+
+	if (!writeExact(file, seekHead.start, newSeekRegion)) {
+		rollback();
+		detail = QStringLiteral("could not update Matroska SeekHead");
+		return false;
+	}
+	seekRegionUpdated = true;
+
+	if (!file.flush()) {
+		rollback();
+		detail = QStringLiteral("could not flush Matroska bitrate metadata");
+		return false;
+	}
+
+	detail = QStringLiteral("wrote BPS tags for %1 audio track(s)").arg(bitratesBps.size());
+	return true;
+}
+
 bool recordingOutputActive()
 {
 	return g_recordingOutput && obs_output_active(g_recordingOutput);
@@ -377,9 +933,27 @@ void releaseInactiveRecordingOutput()
 	if (!g_recordingOutput || obs_output_active(g_recordingOutput))
 		return;
 
+	const QString finalizedPath = g_recordingPath;
+	const std::vector<int64_t> finalizedAudioBitrates = g_recordingAudioBitratesBps;
+	const bool updateBitrateMetadata = g_audioBitrateMetadataPending && g_cleanStopRequested;
+
 	blog(LOG_INFO, "[EB Recorder] releasing inactive local output");
 	obs_output_release(g_recordingOutput);
 	g_recordingOutput = nullptr;
+
+	g_recordingAudioBitratesBps.clear();
+	g_audioBitrateMetadataPending = false;
+	g_cleanStopRequested = false;
+
+	if (updateBitrateMetadata && !finalizedPath.isEmpty()) {
+		QString detail;
+		if (applyMatroskaAudioBitrateMetadata(finalizedPath, finalizedAudioBitrates, detail)) {
+			blog(LOG_INFO, "[EB Recorder] Matroska audio bitrate metadata: %s", detail.toUtf8().constData());
+		} else {
+			blog(LOG_WARNING, "[EB Recorder] Matroska audio bitrate metadata skipped: %s",
+			     detail.toUtf8().constData());
+		}
+	}
 
 	if (g_recordingUiState == RecordingUiState::Stopping ||
 	    g_recordingUiState == RecordingUiState::Recording) {
@@ -410,18 +984,65 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 		return false;
 	}
 
-	obs_encoder_t *audio = obs_get_encoder_by_name(kEbAudioEncoderName);
-	if (!audio || !obs_encoder_active(audio)) {
-		if (audio)
-			obs_encoder_release(audio);
+	struct AcquiredAudio {
+		obs_encoder_t *encoder = nullptr;
+		const char *name = nullptr;
+		int64_t bitrateKbps = 0;
+	};
+	std::vector<AcquiredAudio> audioEncoders;
+	audioEncoders.reserve(2);
+
+	auto releaseAcquiredAudio = [&]() {
+		for (auto &entry : audioEncoders) {
+			if (entry.encoder) {
+				obs_encoder_release(entry.encoder);
+				entry.encoder = nullptr;
+			}
+		}
+	};
+
+	auto acquireAudio = [&](const char *name) -> bool {
+		obs_encoder_t *encoder = obs_get_encoder_by_name(name);
+		if (!encoder || !obs_encoder_active(encoder)) {
+			if (encoder)
+				obs_encoder_release(encoder);
+			return false;
+		}
+
+		int64_t bitrate = 0;
+		obs_data_t *encoderSettings = obs_encoder_get_settings(encoder);
+		if (encoderSettings) {
+			bitrate = obs_data_get_int(encoderSettings, "bitrate");
+			obs_data_release(encoderSettings);
+		}
+		audioEncoders.push_back({encoder, name, bitrate});
+		return true;
+	};
+
+	bool audioOk = true;
+	switch (g_audioSelection) {
+	case AudioSelection::Vod:
+		audioOk = acquireAudio(kEbVodAudioEncoderName);
+		break;
+	case AudioSelection::Both:
+		audioOk = acquireAudio(kEbLiveAudioEncoderName) && acquireAudio(kEbVodAudioEncoderName);
+		break;
+	case AudioSelection::Live:
+	default:
+		audioOk = acquireAudio(kEbLiveAudioEncoderName);
+		break;
+	}
+
+	if (!audioOk) {
+		releaseAcquiredAudio();
 		obs_encoder_release(video);
-		error = ebTr("EBRecorder.Error.NoAudio");
+		error = ebTr("EBRecorder.Error.NoAudio").arg(audioSelectionLabel(g_audioSelection));
 		return false;
 	}
 
 	const QString path = makeRecordingPath();
 	if (path.isEmpty()) {
-		obs_encoder_release(audio);
+		releaseAcquiredAudio();
 		obs_encoder_release(video);
 		error = ebTr("EBRecorder.Error.Path");
 		return false;
@@ -431,22 +1052,25 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 	blog(LOG_INFO, "[EB Recorder] TOP encoder acquired: %p name='%s' codec=%s %ux%u bitrate=%lld kbps",
 	     static_cast<void *>(video), top.name.c_str(), top.codec.c_str(), top.width, top.height,
 	     static_cast<long long>(top.bitrate));
-	blog(LOG_INFO, "[EB Recorder] audio encoder acquired: %p name='%s' codec=%s",
-	     static_cast<void *>(audio), kEbAudioEncoderName,
-	     obs_encoder_get_codec(audio) ? obs_encoder_get_codec(audio) : "unknown");
+	blog(LOG_INFO, "[EB Recorder] audio selection: %s (%d track(s))",
+	     audioSelectionKey(g_audioSelection).toUtf8().constData(), static_cast<int>(audioEncoders.size()));
+	for (size_t i = 0; i < audioEncoders.size(); ++i) {
+		const auto &entry = audioEncoders[i];
+		blog(LOG_INFO, "[EB Recorder] audio encoder %zu acquired: %p name='%s' codec=%s bitrate=%lld kbps", i,
+		     static_cast<void *>(entry.encoder), entry.name,
+		     obs_encoder_get_codec(entry.encoder) ? obs_encoder_get_codec(entry.encoder) : "unknown",
+		     static_cast<long long>(entry.bitrateKbps));
+	}
 
 	obs_data_t *settings = obs_data_create();
 	const QByteArray pathUtf8 = path.toUtf8();
 	obs_data_set_string(settings, "path", pathUtf8.constData());
-	// ffmpeg_muxer selects Matroska from the .mkv extension.  Limit clusters
-	// to 1 second so an abrupt termination normally sacrifices at most a small
-	// tail rather than the whole recording.
 	obs_data_set_string(settings, "muxer_settings", kMuxerSettings);
 	obs_output_t *output = obs_output_create(kLocalOutputType, kLocalOutputName, settings, nullptr);
 	obs_data_release(settings);
 
 	if (!output) {
-		obs_encoder_release(audio);
+		releaseAcquiredAudio();
 		obs_encoder_release(video);
 		error = ebTr("EBRecorder.Error.OutputCreate");
 		return false;
@@ -457,20 +1081,28 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 	blog(LOG_INFO, "[EB Recorder] crash-resilience: Matroska clusters <= 1000 ms (muxer_settings='%s')",
 	     kMuxerSettings);
 
-	// IMPORTANT: attach the already-existing Enhanced Broadcasting encoder objects.
-	// obs_output_set_* takes its own references. EB Recorder never creates a video
-	// or audio encoder in v0.3.0.
 	obs_output_set_video_encoder2(output, video, 0);
-	obs_output_set_audio_encoder(output, audio, 0);
+	for (size_t i = 0; i < audioEncoders.size(); ++i)
+		obs_output_set_audio_encoder(output, audioEncoders[i].encoder, i);
 
 	const bool videoReused = obs_output_get_video_encoder2(output, 0) == video;
-	const bool audioReused = obs_output_get_audio_encoder(output, 0) == audio;
+	bool audioReused = true;
 	blog(LOG_INFO, "[EB Recorder] attached existing TOP video encoder: %s (output=%p encoder=%p)",
 	     videoReused ? "YES" : "NO", static_cast<void *>(output), static_cast<void *>(video));
-	blog(LOG_INFO, "[EB Recorder] attached existing EB audio encoder: %s (output=%p encoder=%p)",
-	     audioReused ? "YES" : "NO", static_cast<void *>(output), static_cast<void *>(audio));
+	for (size_t i = 0; i < audioEncoders.size(); ++i) {
+		const bool reused = obs_output_get_audio_encoder(output, i) == audioEncoders[i].encoder;
+		audioReused = audioReused && reused;
+		blog(LOG_INFO, "[EB Recorder] attached existing EB audio encoder %zu: %s (output=%p encoder=%p name='%s')",
+		     i, reused ? "YES" : "NO", static_cast<void *>(output), static_cast<void *>(audioEncoders[i].encoder),
+		     audioEncoders[i].name);
+	}
 
-	obs_encoder_release(audio);
+	std::vector<int64_t> capturedBitratesBps;
+	capturedBitratesBps.reserve(audioEncoders.size());
+	for (const auto &entry : audioEncoders)
+		capturedBitratesBps.push_back(entry.bitrateKbps > 0 ? entry.bitrateKbps * 1000 : 0);
+
+	releaseAcquiredAudio();
 	obs_encoder_release(video);
 
 	if (!videoReused || !audioReused) {
@@ -495,6 +1127,11 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 	g_recordingPath = path;
 	g_recordingError.clear();
 	g_recordingUiState = RecordingUiState::Recording;
+	g_recordingAudioBitratesBps = std::move(capturedBitratesBps);
+	g_audioBitrateMetadataPending = std::any_of(g_recordingAudioBitratesBps.begin(),
+							      g_recordingAudioBitratesBps.end(),
+							      [](int64_t value) { return value > 0; });
+	g_cleanStopRequested = false;
 
 	blog(LOG_INFO, "[EB Recorder] recording started: container=mkv path='%s'", pathUtf8.constData());
 	blog(LOG_INFO, "[EB Recorder] encoder reuse invariant: no encoder was created by EB Recorder");
@@ -514,6 +1151,7 @@ void stopLocalRecording(bool force, const char *reason)
 	blog(LOG_INFO, "[EB Recorder] stopping local recording (%s, force=%s)", reason ? reason : "unspecified",
 	     force ? "yes" : "no");
 	g_recordingUiState = RecordingUiState::Stopping;
+	g_cleanStopRequested = !force;
 
 	if (force)
 		obs_output_force_stop(g_recordingOutput);
@@ -530,11 +1168,15 @@ void cleanupRecordingOutput()
 
 	if (obs_output_active(g_recordingOutput)) {
 		blog(LOG_WARNING, "[EB Recorder] local output still active during cleanup; forcing stop");
+		g_cleanStopRequested = false;
 		obs_output_force_stop(g_recordingOutput);
 	}
 
 	obs_output_release(g_recordingOutput);
 	g_recordingOutput = nullptr;
+	g_recordingAudioBitratesBps.clear();
+	g_audioBitrateMetadataPending = false;
+	g_cleanStopRequested = false;
 	g_recordingUiState = RecordingUiState::Stopped;
 }
 
@@ -559,20 +1201,24 @@ void initializeSettingsPath()
 
 	QSettings settings(g_settingsPath, QSettings::IniFormat);
 	g_autoRecordEnabled = settings.value(QStringLiteral("General/AutoRecordWithStream"), false).toBool();
-	blog(LOG_INFO, "[EB Recorder] settings loaded: auto_record_with_stream=%s path='%s'",
-	     g_autoRecordEnabled ? "yes" : "no", g_settingsPath.toUtf8().constData());
+	g_audioSelection = audioSelectionFromKey(
+		settings.value(QStringLiteral("General/AudioSelection"), QStringLiteral("live")).toString());
+	blog(LOG_INFO, "[EB Recorder] settings loaded: auto_record_with_stream=%s audio_selection=%s path='%s'",
+	     g_autoRecordEnabled ? "yes" : "no", audioSelectionKey(g_audioSelection).toUtf8().constData(),
+	     g_settingsPath.toUtf8().constData());
 }
 
-void saveAutoRecordSetting()
+void savePluginSettings()
 {
 	if (g_settingsPath.isEmpty())
 		return;
 
 	QSettings settings(g_settingsPath, QSettings::IniFormat);
 	settings.setValue(QStringLiteral("General/AutoRecordWithStream"), g_autoRecordEnabled);
+	settings.setValue(QStringLiteral("General/AudioSelection"), audioSelectionKey(g_audioSelection));
 	settings.sync();
 	if (settings.status() != QSettings::NoError) {
-		blog(LOG_WARNING, "[EB Recorder] failed to save automatic-record setting to '%s'",
+		blog(LOG_WARNING, "[EB Recorder] failed to save plugin settings to '%s'",
 		     g_settingsPath.toUtf8().constData());
 	}
 }
@@ -624,9 +1270,9 @@ void tryAutomaticRecordingStart()
 
 	const auto encoders = getEbEncoders();
 	const EncoderInfo *top = findTopEncoder(encoders);
-	const bool audioAvailable = ebAudioEncoderActive();
+	const EbAudioState audio = getEbAudioState();
 
-	if (top && audioAvailable) {
+	if (top && selectedAudioReady(audio)) {
 		QString error;
 		if (startLocalRecording(*top, error)) {
 			blog(LOG_INFO, "[EB Recorder] automatic recording started with EB stream");
@@ -694,7 +1340,7 @@ void setAutoRecordEnabled(bool enabled)
 		return;
 
 	g_autoRecordEnabled = enabled;
-	saveAutoRecordSetting();
+	savePluginSettings();
 	blog(LOG_INFO, "[EB Recorder] automatic recording with EB stream: %s", enabled ? "enabled" : "disabled");
 
 	if (!enabled) {
@@ -702,10 +1348,22 @@ void setAutoRecordEnabled(bool enabled)
 		return;
 	}
 
-	// If the user enables the option while an EB stream is already live, start
-	// recording that current session instead of waiting for the next stream.
 	if (obs_frontend_streaming_active() && !recordingOutputActive())
 		armAutomaticRecording("setting enabled during active stream");
+}
+
+void setAudioSelection(AudioSelection selection)
+{
+	if (g_audioSelection == selection)
+		return;
+
+	g_audioSelection = selection;
+	savePluginSettings();
+	blog(LOG_INFO, "[EB Recorder] audio selection changed: %s",
+	     audioSelectionKey(g_audioSelection).toUtf8().constData());
+
+	if (g_autoRecordEnabled && obs_frontend_streaming_active() && !recordingOutputActive())
+		armAutomaticRecording("audio selection changed during active stream");
 }
 
 class EBRecorderDialog final : public QDialog {
@@ -762,6 +1420,18 @@ public:
 		autoRecordCheckBox_->setChecked(g_autoRecordEnabled);
 		autoRecordCheckBox_->setToolTip(ebTr("EBRecorder.AutoRecord.Tooltip"));
 		settingsLayout->addWidget(autoRecordCheckBox_);
+
+		auto *audioSelectionRow = new QHBoxLayout;
+		auto *audioSelectionLabelWidget = new QLabel(ebTr("EBRecorder.AudioSelection"), settingsBox);
+		audioSelectionCombo_ = new QComboBox(settingsBox);
+		audioSelectionCombo_->addItem(ebTr("EBRecorder.AudioSelection.Live"));
+		audioSelectionCombo_->addItem(ebTr("EBRecorder.AudioSelection.Vod"));
+		audioSelectionCombo_->addItem(ebTr("EBRecorder.AudioSelection.Both"));
+		audioSelectionCombo_->setCurrentIndex(static_cast<int>(g_audioSelection));
+		audioSelectionCombo_->setToolTip(ebTr("EBRecorder.AudioSelection.Tooltip"));
+		audioSelectionRow->addWidget(audioSelectionLabelWidget);
+		audioSelectionRow->addWidget(audioSelectionCombo_, 1);
+		settingsLayout->addLayout(audioSelectionRow);
 		root->addWidget(settingsBox);
 
 		auto *buttons = new QHBoxLayout;
@@ -779,6 +1449,11 @@ public:
 		connect(refreshButton, &QPushButton::clicked, this, [this]() { refreshEncoders(true); });
 		connect(autoRecordCheckBox_, &QCheckBox::toggled, this, [this](bool checked) {
 			setAutoRecordEnabled(checked);
+			refreshEncoders(true);
+		});
+		connect(audioSelectionCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+			if (index >= 0 && index <= static_cast<int>(AudioSelection::Both))
+				setAudioSelection(static_cast<AudioSelection>(index));
 			refreshEncoders(true);
 		});
 		connect(startButton_, &QPushButton::clicked, this, [this]() { startRecording(); });
@@ -861,6 +1536,7 @@ private:
 
 		startButton_->setEnabled(!active && topAvailable && audioAvailable);
 		stopButton_->setEnabled(active);
+		audioSelectionCombo_->setEnabled(!active);
 	}
 
 	void refreshEncoders(bool forceLog)
@@ -869,12 +1545,18 @@ private:
 
 		const auto encoders = getEbEncoders();
 		const EncoderInfo *top = findTopEncoder(encoders);
-		const bool audioAvailable = ebAudioEncoderActive();
+		const EbAudioState audio = getEbAudioState();
+		const bool audioAvailable = selectedAudioReady(audio);
 		const int activeCount = static_cast<int>(std::count_if(encoders.begin(), encoders.end(),
 							   [](const EncoderInfo &e) { return e.active; }));
 
 		const QString encoderUiSignature = makeSignature(encoders, top) +
-					   QStringLiteral("|audio=%1").arg(audioAvailable ? 1 : 0);
+			QStringLiteral("|live=%1:%2|vod=%3:%4|audio_selection=%5")
+				.arg(audio.live.active ? 1 : 0)
+				.arg(audio.live.bitrate)
+				.arg(audio.vod.active ? 1 : 0)
+				.arg(audio.vod.bitrate)
+				.arg(audioSelectionKey(g_audioSelection));
 		if (encoderUiSignature != lastEncoderUiSignature_) {
 			lastEncoderUiSignature_ = encoderUiSignature;
 
@@ -930,8 +1612,7 @@ private:
 						.arg(top->bitrate));
 			}
 
-			audioLabel_->setText(audioAvailable ? ebTr("EBRecorder.Audio.Ready").arg(kEbAudioEncoderName)
-							 : ebTr("EBRecorder.Audio.Missing").arg(kEbAudioEncoderName));
+			audioLabel_->setText(formatAudioStatus(audio));
 		}
 
 		const QString recordingUiSignature =
@@ -953,8 +1634,10 @@ private:
 		if (forceLog || logSignature != lastLogSignature_) {
 			lastLogSignature_ = logSignature;
 			blog(LOG_INFO,
-			     "[EB Recorder] EB encoder scan: %d found, %d active, audio=%s, local_recording=%s, auto_record=%s, auto_pending=%s",
-			     static_cast<int>(encoders.size()), activeCount, audioAvailable ? "active" : "inactive",
+			     "[EB Recorder] EB encoder scan: %d found, %d active, live_audio=%s/%lldkbps, vod_audio=%s/%lldkbps, audio_selection=%s, local_recording=%s, auto_record=%s, auto_pending=%s",
+			     static_cast<int>(encoders.size()), activeCount, audio.live.active ? "active" : "inactive",
+			     static_cast<long long>(audio.live.bitrate), audio.vod.active ? "active" : "inactive",
+			     static_cast<long long>(audio.vod.bitrate), audioSelectionKey(g_audioSelection).toUtf8().constData(),
 			     recordingOutputActive() ? "active" : "inactive",
 			     g_autoRecordEnabled ? "enabled" : "disabled", g_autoStartPending ? "yes" : "no");
 			for (const auto &encoder : encoders) {
@@ -973,6 +1656,7 @@ private:
 	QLabel *audioLabel_ = nullptr;
 	QLabel *recordingLabel_ = nullptr;
 	QCheckBox *autoRecordCheckBox_ = nullptr;
+	QComboBox *audioSelectionCombo_ = nullptr;
 	QPushButton *startButton_ = nullptr;
 	QPushButton *stopButton_ = nullptr;
 	QTimer *timer_ = nullptr;

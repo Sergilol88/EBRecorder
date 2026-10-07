@@ -8,7 +8,9 @@ First public baseline.
 - Automatic start works with the EB Recorder dialog closed.
 - Manual stop suppresses another automatic restart during the same stream session.
 - Kept TOP-only reuse of the existing Twitch EB video encoder.
-- Kept reuse of the existing EB live AAC encoder.
+- Added selectable reuse of the existing EB Live, VOD, or Live + VOD AAC encoders.
+- VOD-dependent choices now follow the current OBS output configuration and fall back to Live when a separate Twitch VOD track is unavailable.
+- Added per-track Matroska `BPS` metadata after clean stops so audio bitrate is visible to metadata readers such as Windows Explorer.
 - MKV recording through OBS `ffmpeg_muxer`.
 - Matroska `cluster_time_limit=1000` for crash-resilient output.
 - Local recording stops before EB encoder teardown.

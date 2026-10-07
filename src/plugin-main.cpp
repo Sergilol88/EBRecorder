@@ -22,6 +22,8 @@
 #include <QLabel>
 #include <QPointer>
 #include <QSettings>
+#include <QSignalBlocker>
+#include <QStandardItemModel>
 #include <QPushButton>
 #include <QString>
 #include <QStandardPaths>
@@ -140,13 +142,18 @@ QString fallbackText(const char *key)
 		{"EBRecorder.Audio.ActiveWithBitrate", "active, %1 kbps", "активно, %1 кбит/с"},
 		{"EBRecorder.Audio.Active", "active", "активно"},
 		{"EBRecorder.Audio.Inactive", "not active", "не активно"},
+		{"EBRecorder.Audio.VodDisabled", "disabled in OBS output settings", "отключено в настройках вывода OBS"},
+		{"EBRecorder.Audio.VodWaiting", "enabled in OBS, waiting for EB", "включено в OBS, ожидает запуска EB"},
 		{"EBRecorder.AudioSelection", "Audio tracks", "Аудиодорожки"},
 		{"EBRecorder.AudioSelection.Live", "Live", "Live"},
 		{"EBRecorder.AudioSelection.Vod", "VOD", "VOD"},
 		{"EBRecorder.AudioSelection.Both", "Live + VOD", "Live + VOD"},
 		{"EBRecorder.AudioSelection.Tooltip",
-		 "Choose which existing Enhanced Broadcasting audio encoder(s) are reused in the local MKV. VOD requires OBS/Twitch VOD Track to expose the VOD EB encoder. Changing this option affects the next recording.",
-		 "Выбери, какие уже работающие аудиокодировщики Enhanced Broadcasting использовать в локальном MKV. Для VOD OBS/Twitch должен создать отдельный VOD-кодировщик. Изменение применяется к следующей записи."},
+		 "Choose which existing Enhanced Broadcasting audio encoder(s) are reused in the local MKV. VOD choices are disabled when the current OBS output settings cannot create a separate Twitch VOD Track. Changing this option affects the next recording.",
+		 "Выбери, какие уже работающие аудиокодировщики Enhanced Broadcasting использовать в локальном MKV. Варианты с VOD недоступны, если текущие настройки вывода OBS не могут создать отдельную дорожку Twitch VOD. Изменение применяется к следующей записи."},
+		{"EBRecorder.AudioSelection.VodUnavailable",
+		 "Enable Twitch VOD Track in OBS Settings → Output. In Advanced mode, the Live and VOD tracks must be different.",
+		 "Включи «Дорожка Twitch VOD» в OBS → Настройки → Вывод. В расширенном режиме Live и VOD должны использовать разные дорожки."},
 		{"EBRecorder.Recording.Idle", "Local EB recording: stopped.", "Локальная EB-запись: остановлена."},
 		{"EBRecorder.Recording.Active", "Local EB recording: RECORDING → %1",
 		 "Локальная EB-запись: ИДЁТ → %1"},
@@ -374,9 +381,62 @@ struct EbAudioState {
 	AudioEncoderInfo vod;
 };
 
+struct VodTrackConfigState {
+	bool known = false;
+	bool configured = false;
+	bool enabledFlag = false;
+	bool distinctTracks = true;
+	bool advancedOutput = false;
+	int liveTrack = 0;
+	int vodTrack = 0;
+};
+
 EbAudioState getEbAudioState()
 {
 	return {getAudioEncoderInfo(kEbLiveAudioEncoderName), getAudioEncoderInfo(kEbVodAudioEncoderName)};
+}
+
+VodTrackConfigState getObsVodTrackConfigState()
+{
+	VodTrackConfigState state;
+	config_t *config = obs_frontend_get_profile_config();
+	if (!config)
+		return state;
+
+	const char *mode = config_get_string(config, "Output", "Mode");
+	if (!mode || !*mode)
+		return state;
+
+	state.known = true;
+	state.advancedOutput = std::strcmp(mode, "Advanced") == 0;
+
+	if (state.advancedOutput) {
+		state.enabledFlag = config_get_bool(config, "AdvOut", "VodTrackEnabled");
+		state.liveTrack = static_cast<int>(config_get_int(config, "AdvOut", "TrackIndex"));
+		state.vodTrack = static_cast<int>(config_get_int(config, "AdvOut", "VodTrackIndex"));
+		state.distinctTracks = state.liveTrack > 0 && state.vodTrack > 0 && state.liveTrack != state.vodTrack;
+		state.configured = state.enabledFlag && state.distinctTracks;
+	} else {
+		// This mirrors OBS SimpleOutput::IsVodTrackEnabled() apart from the
+		// service capability check. EB Recorder is only useful with Twitch EB;
+		// once streaming starts, the real VOD encoder remains the final truth.
+		const bool simpleAdvanced = config_get_bool(config, "SimpleOutput", "UseAdvanced");
+		state.enabledFlag = config_get_bool(config, "SimpleOutput", "VodTrackEnabled");
+		state.configured = simpleAdvanced && state.enabledFlag;
+	}
+
+	return state;
+}
+
+bool vodSelectionAllowed(const EbAudioState &audio, const VodTrackConfigState &config)
+{
+	// While EB is live, the actual active encoder is authoritative. Before EB
+	// starts, use the current OBS profile settings to prevent impossible choices.
+	if (audio.vod.active)
+		return true;
+	if (!config.known)
+		return true;
+	return config.configured;
 }
 
 QString audioSelectionKey(AudioSelection selection)
@@ -436,11 +496,22 @@ QString formatAudioEncoderState(const AudioEncoderInfo &audio)
 	return ebTr("EBRecorder.Audio.Active");
 }
 
-QString formatAudioStatus(const EbAudioState &audio)
+QString formatVodAudioState(const AudioEncoderInfo &vod, const VodTrackConfigState &config)
+{
+	if (vod.active)
+		return formatAudioEncoderState(vod);
+	if (config.known && !config.configured)
+		return ebTr("EBRecorder.Audio.VodDisabled");
+	if (config.known && config.configured)
+		return ebTr("EBRecorder.Audio.VodWaiting");
+	return formatAudioEncoderState(vod);
+}
+
+QString formatAudioStatus(const EbAudioState &audio, const VodTrackConfigState &config)
 {
 	return ebTr("EBRecorder.Audio.Status")
 		.arg(formatAudioEncoderState(audio.live))
-		.arg(formatAudioEncoderState(audio.vod))
+		.arg(formatVodAudioState(audio.vod, config))
 		.arg(audioSelectionLabel(g_audioSelection));
 }
 
@@ -1223,6 +1294,22 @@ void savePluginSettings()
 	}
 }
 
+bool normalizeAudioSelectionForVodAvailability(const EbAudioState &audio, const VodTrackConfigState &vodConfig,
+					       const char *reason)
+{
+	if (g_audioSelection == AudioSelection::Live || recordingOutputActive() ||
+	    vodSelectionAllowed(audio, vodConfig)) {
+		return false;
+	}
+
+	blog(LOG_INFO,
+	     "[EB Recorder] audio selection '%s' is unavailable with current OBS VOD settings; falling back to Live (%s)",
+	     audioSelectionKey(g_audioSelection).toUtf8().constData(), reason ? reason : "unspecified");
+	g_audioSelection = AudioSelection::Live;
+	savePluginSettings();
+	return true;
+}
+
 void stopAutoStartTimer()
 {
 	if (g_autoStartTimer)
@@ -1271,6 +1358,8 @@ void tryAutomaticRecordingStart()
 	const auto encoders = getEbEncoders();
 	const EncoderInfo *top = findTopEncoder(encoders);
 	const EbAudioState audio = getEbAudioState();
+	const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
+	normalizeAudioSelectionForVodAvailability(audio, vodConfig, "automatic start");
 
 	if (top && selectedAudioReady(audio)) {
 		QString error;
@@ -1354,6 +1443,15 @@ void setAutoRecordEnabled(bool enabled)
 
 void setAudioSelection(AudioSelection selection)
 {
+	if (selection != AudioSelection::Live) {
+		const EbAudioState audio = getEbAudioState();
+		const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
+		if (!vodSelectionAllowed(audio, vodConfig)) {
+			blog(LOG_INFO, "[EB Recorder] ignored unavailable VOD audio selection; using Live");
+			selection = AudioSelection::Live;
+		}
+	}
+
 	if (g_audioSelection == selection)
 		return;
 
@@ -1483,8 +1581,32 @@ public:
 	void refreshNow() { refreshEncoders(true); }
 
 private:
+	void updateAudioSelectionChoices(bool vodSelectable)
+	{
+		auto *model = qobject_cast<QStandardItemModel *>(audioSelectionCombo_->model());
+		if (model) {
+			if (auto *vodItem = model->item(static_cast<int>(AudioSelection::Vod)))
+				vodItem->setEnabled(vodSelectable);
+			if (auto *bothItem = model->item(static_cast<int>(AudioSelection::Both)))
+				bothItem->setEnabled(vodSelectable);
+		}
+
+		const QString baseTooltip = ebTr("EBRecorder.AudioSelection.Tooltip");
+		audioSelectionCombo_->setToolTip(vodSelectable
+						 ? baseTooltip
+						 : baseTooltip + QStringLiteral("\n\n") +
+							   ebTr("EBRecorder.AudioSelection.VodUnavailable"));
+	}
+
 	void startRecording()
 	{
+		const EbAudioState audio = getEbAudioState();
+		const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
+		if (normalizeAudioSelectionForVodAvailability(audio, vodConfig, "manual start")) {
+			QSignalBlocker blocker(audioSelectionCombo_);
+			audioSelectionCombo_->setCurrentIndex(static_cast<int>(g_audioSelection));
+		}
+
 		const auto encoders = getEbEncoders();
 		const EncoderInfo *top = findTopEncoder(encoders);
 		if (!top) {
@@ -1547,16 +1669,27 @@ private:
 		const auto encoders = getEbEncoders();
 		const EncoderInfo *top = findTopEncoder(encoders);
 		const EbAudioState audio = getEbAudioState();
+		const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
+		const bool vodSelectable = vodSelectionAllowed(audio, vodConfig);
+		if (normalizeAudioSelectionForVodAvailability(audio, vodConfig, "dialog refresh")) {
+			QSignalBlocker blocker(audioSelectionCombo_);
+			audioSelectionCombo_->setCurrentIndex(static_cast<int>(g_audioSelection));
+		}
+		updateAudioSelectionChoices(vodSelectable);
 		const bool audioAvailable = selectedAudioReady(audio);
 		const int activeCount = static_cast<int>(std::count_if(encoders.begin(), encoders.end(),
 							   [](const EncoderInfo &e) { return e.active; }));
 
 		const QString encoderUiSignature = makeSignature(encoders, top) +
-			QStringLiteral("|live=%1:%2|vod=%3:%4|audio_selection=%5")
+			QStringLiteral("|live=%1:%2|vod=%3:%4|vod_cfg_known=%5|vod_cfg=%6|vod_tracks=%7:%8|audio_selection=%9")
 				.arg(audio.live.active ? 1 : 0)
 				.arg(audio.live.bitrate)
 				.arg(audio.vod.active ? 1 : 0)
 				.arg(audio.vod.bitrate)
+				.arg(vodConfig.known ? 1 : 0)
+				.arg(vodConfig.configured ? 1 : 0)
+				.arg(vodConfig.liveTrack)
+				.arg(vodConfig.vodTrack)
 				.arg(audioSelectionKey(g_audioSelection));
 		if (encoderUiSignature != lastEncoderUiSignature_) {
 			lastEncoderUiSignature_ = encoderUiSignature;
@@ -1613,7 +1746,7 @@ private:
 						.arg(top->bitrate));
 			}
 
-			audioLabel_->setText(formatAudioStatus(audio));
+			audioLabel_->setText(formatAudioStatus(audio, vodConfig));
 		}
 
 		const QString recordingUiSignature =
@@ -1635,11 +1768,11 @@ private:
 		if (forceLog || logSignature != lastLogSignature_) {
 			lastLogSignature_ = logSignature;
 			blog(LOG_INFO,
-			     "[EB Recorder] EB encoder scan: %d found, %d active, live_audio=%s/%lldkbps, vod_audio=%s/%lldkbps, audio_selection=%s, local_recording=%s, auto_record=%s, auto_pending=%s",
+			     "[EB Recorder] EB encoder scan: %d found, %d active, live_audio=%s/%lldkbps, vod_audio=%s/%lldkbps, vod_config=%s, audio_selection=%s, local_recording=%s, auto_record=%s, auto_pending=%s",
 			     static_cast<int>(encoders.size()), activeCount, audio.live.active ? "active" : "inactive",
 			     static_cast<long long>(audio.live.bitrate), audio.vod.active ? "active" : "inactive",
-			     static_cast<long long>(audio.vod.bitrate), audioSelectionKey(g_audioSelection).toUtf8().constData(),
-			     recordingOutputActive() ? "active" : "inactive",
+			     static_cast<long long>(audio.vod.bitrate), vodConfig.configured ? "enabled" : "disabled",
+			     audioSelectionKey(g_audioSelection).toUtf8().constData(), recordingOutputActive() ? "active" : "inactive",
 			     g_autoRecordEnabled ? "enabled" : "disabled", g_autoStartPending ? "yes" : "no");
 			for (const auto &encoder : encoders) {
 				blog(LOG_INFO,

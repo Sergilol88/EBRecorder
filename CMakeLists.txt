@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.2...4.3)
 
-project(eb-recorder VERSION 0.3.0 LANGUAGES CXX)
+project(eb-recorder VERSION 0.3.1 LANGUAGES CXX)
 
 find_package(libobs CONFIG REQUIRED)
 find_package(obs-frontend-api CONFIG REQUIRED)

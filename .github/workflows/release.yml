@@ -1,0 +1,98 @@
+name: Windows release
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build production package
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "EB Recorder production build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Validate release artifacts
+        shell: powershell
+        run: |
+          $Version = (Get-Content .\VERSION.txt -Raw).Trim()
+          if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Invalid VERSION.txt value: '$Version'"
+          }
+
+          $Zip = "EBRecorder-v$Version-Windows-x64.zip"
+          $Sha = "$Zip.sha256"
+          $Notes = "release-notes\v$Version.md"
+
+          foreach ($Required in @($Zip, $Sha, $Notes)) {
+            if (-not (Test-Path $Required -PathType Leaf)) {
+              throw "Required release artifact was not found: $Required"
+            }
+          }
+
+          $Actual = (Get-FileHash $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $Expected = (((Get-Content $Sha -Raw).Trim() -split '\s+')[0]).ToLowerInvariant()
+          if ($Actual -ne $Expected) {
+            throw "Release ZIP SHA256 mismatch. Actual=$Actual Expected=$Expected"
+          }
+
+          "PLUGIN_VERSION=$Version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_ZIP=$Zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_SHA=$Sha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_NOTES=$Notes" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Validated release package: $Zip"
+          Write-Host "SHA256: $Actual"
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EBRecorder-v${{ env.PLUGIN_VERSION }}-Windows-x64
+          path: |
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.RELEASE_SHA }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $Tag = "v$env:PLUGIN_VERSION"
+
+          gh release view $Tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $Tag already exists; leaving it unchanged."
+            exit 0
+          }
+
+          gh release create $Tag `
+            $env:RELEASE_ZIP `
+            $env:RELEASE_SHA `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title "EB Recorder $Tag" `
+            --notes-file $env:RELEASE_NOTES
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub release creation failed with exit code $LASTEXITCODE"
+          }

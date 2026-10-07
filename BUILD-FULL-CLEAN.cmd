@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo WARNING: this removes all local build caches and downloaded archives for r6.2.
+echo WARNING: this removes all local build caches and downloaded archives for r6.3.
 echo Older EB Recorder folders are not touched.
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build-windows.ps1" -FullClean

@@ -34,8 +34,8 @@ The script:
 Output:
 
 ```text
-EBRecorder-v0.3.0-Windows-x64.zip
-EBRecorder-v0.3.0-Windows-x64.zip.sha256
+EBRecorder-vX.Y.Z-Windows-x64.zip
+EBRecorder-vX.Y.Z-Windows-x64.zip.sha256
 ```
 
 The plugin binary is built as a production `Release` target. Debug symbols are not shipped in the user archive. The locally cached OBS development SDK may still use `RelWithDebInfo`; it is a build-only dependency and is never included in the release package.

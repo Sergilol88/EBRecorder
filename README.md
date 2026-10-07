@@ -16,8 +16,8 @@ EB Recorder instead finds OBS's active Enhanced Broadcasting encoders, selects t
 
 ```text
 Existing Twitch EB TOP video encoder ─┐
-                                      ├─ EB Recorder -> MKV
-Existing Twitch EB live AAC encoder ──┘
+Existing Twitch EB Live AAC encoder ──┼─ EB Recorder -> MKV
+Existing Twitch EB VOD AAC encoder  ──┘   (optional / selectable)
 ```
 
 No extra video encoder is created by EB Recorder.
@@ -26,8 +26,11 @@ No extra video encoder is created by EB Recorder.
 
 - Records only the highest-resolution active Twitch Enhanced Broadcasting rendition.
 - Reuses the existing EB video encoder instead of creating another one.
-- Reuses the existing EB live AAC encoder.
+- Lets you record the existing EB **Live**, **VOD**, or **Live + VOD** AAC audio encoder(s).
+- Disables VOD-dependent choices when the current OBS output configuration cannot create a separate Twitch VOD track, and safely falls back to Live if a previously saved VOD choice becomes unavailable.
+- Reuses those audio encoders too; selecting two tracks does not create another audio encode.
 - Writes Matroska (`.mkv`) files to the current OBS recording directory.
+- After a clean stop, writes Matroska `BPS` technical tags for the recorded audio track(s), using the bitrate configured on the reused EB encoder(s), without remuxing or re-encoding the file.
 - Crash-resilient recording using short Matroska clusters (`cluster_time_limit=1000`).
 - Optional **automatic recording start with the EB stream**.
 - Automatic stop before the Enhanced Broadcasting encoder pipeline is torn down.
@@ -124,7 +127,9 @@ Files are written to the same folder configured in OBS for local recordings. In 
 EBRecorder_yyyy-MM-dd_HH-mm-ss.mkv
 ```
 
-The local file contains only the selected TOP EB video rendition plus the EB live AAC track.
+The local file contains the selected TOP EB video rendition plus the audio selection configured in **Tools → EB Recorder**: **Live**, **VOD**, or **Live + VOD**.
+
+On a clean recording stop, EB Recorder adds per-track Matroska `BPS` metadata so metadata readers can expose the configured AAC bitrate (for example, 160 kbps). This is a tiny in-place metadata finalization step: the encoded media packets are not remuxed or re-encoded. If OBS is terminated abruptly, the crash-resilient MKV remains the priority and this optional final metadata step may not run.
 
 ## Crash resilience
 
@@ -159,8 +164,10 @@ See [BUILD.md](BUILD.md).
 - Windows x64 is the only tested release platform.
 - The plugin currently records the highest-resolution active EB rendition only; manual rendition selection is not implemented.
 - The EB encoder names are discovered from OBS's current Multitrack Video naming convention.
+- VOD and Live + VOD modes require OBS/Twitch to expose `multitrack video vod audio 0`; when the current OBS output settings cannot create a separate VOD track, those choices are disabled and a stale saved VOD selection falls back to Live.
 - The release has been validated against OBS Studio 32.2.2; future OBS changes can require compatibility updates.
-- EB Recorder records the EB live audio track exposed by OBS; separate local audio stems are not currently supported.
+- Audio selection is limited to the EB Live/VOD encoders; arbitrary local OBS audio stems are not currently supported.
+- Per-track bitrate display depends on the metadata reader honoring Matroska `BPS` tags.
 
 ## Bugs and feature requests
 
@@ -176,7 +183,7 @@ Please use GitHub Issues. Include:
 
 ## Project status
 
-`v0.3.0` is the first feature-complete public baseline: TOP-only encoder reuse, MKV output, crash-resilient recording, manual controls and optional automatic start with the EB stream.
+`v0.3.0` is the first feature-complete public baseline. The current release, **v0.3.1**, adds selectable EB Live/VOD audio reuse, VOD-aware UI, and per-track Matroska bitrate metadata while keeping the zero-extra-encoder architecture.
 
 ## License
 

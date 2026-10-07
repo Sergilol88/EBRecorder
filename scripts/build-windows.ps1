@@ -244,7 +244,7 @@ Write-Host "Visual Studio path: $($EnvInfo.VSPath)"
 Write-Host "CMake: $($EnvInfo.CMakeVersionLine)"
 Write-Host "CMake path: $CMakeExe"
 Write-Host ''
-Write-Host 'EB Recorder r6.2 production build strategy:'
+Write-Host 'EB Recorder r6.3 production build strategy:'
 Write-Host '  - no obs-plugintemplate bootstrap'
 Write-Host '  - one OBS x64 SDK build only'
 Write-Host '  - no nested Win32 build'
@@ -322,7 +322,7 @@ if (-not (Test-Path $ObsDepsPrefix)) {
 $PrefixPath = "$ObsSdk;$ObsDepsPrefix;$QtPrefix"
 
 Write-Host ''
-Write-Host 'EB Recorder build package: r6.2 (production Release)' -ForegroundColor Cyan
+Write-Host 'EB Recorder build package: r6.3 (production Release)' -ForegroundColor Cyan
 Write-Host 'Configuring EB Recorder plugin...'
 $PluginConfigureArgs = @(
     '-S', $Root,
@@ -363,7 +363,29 @@ Copy-Item (Join-Path $Root 'UNINSTALL.cmd') $DistDir -Force
 Copy-Item (Join-Path $Root 'scripts\install.ps1') $DistDir -Force
 Copy-Item (Join-Path $Root 'scripts\uninstall.ps1') $DistDir -Force
 
-$ZipPath = Join-Path $Root 'EBRecorder-v0.3.0-Windows-x64.zip'
+$VersionFile = Join-Path $Root 'VERSION.txt'
+if (-not (Test-Path $VersionFile -PathType Leaf)) {
+    throw "VERSION.txt was not found at '$VersionFile'."
+}
+$PluginVersion = (Get-Content $VersionFile -Raw).Trim()
+if ($PluginVersion -notmatch '^\d+\.\d+\.\d+
+Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+Compress-Archive -Path (Join-Path $DistDir '*') -DestinationPath $ZipPath -CompressionLevel Optimal
+
+$ReleaseSha256 = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$ShaPath = "$ZipPath.sha256"
+[IO.File]::WriteAllText($ShaPath, "$ReleaseSha256  $([IO.Path]::GetFileName($ZipPath))`r`n", (New-Object Text.UTF8Encoding($false)))
+
+Write-Host ''
+Write-Host 'Build complete.' -ForegroundColor Green
+Write-Host "Release archive: $ZipPath"
+Write-Host "SHA256:          $ReleaseSha256"
+Write-Host "Checksum file:   $ShaPath"
+Write-Host 'Install by extracting the release archive and running INSTALL.cmd.'
+) {
+    throw "VERSION.txt must contain a semantic version like 0.3.1. Found: '$PluginVersion'"
+}
+$ZipPath = Join-Path $Root "EBRecorder-v$PluginVersion-Windows-x64.zip"
 Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $DistDir '*') -DestinationPath $ZipPath -CompressionLevel Optimal
 

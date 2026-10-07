@@ -46,7 +46,7 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("eb-recorder", "en-US")
 
 namespace {
-constexpr const char *kVersion = "0.3.0";
+constexpr const char *kVersion = "0.3.1";
 constexpr const char *kEbEncoderPrefix = "multitrack video video encoder ";
 constexpr const char *kEbLiveAudioEncoderName = "multitrack video live audio 0";
 constexpr const char *kEbVodAudioEncoderName = "multitrack video vod audio 0";
@@ -122,10 +122,10 @@ QString fallbackText(const char *key)
 	};
 
 	static const Translation translations[] = {
-		{"EBRecorder.Title", "EB Recorder 0.3.0", "EB Recorder 0.3.0"},
+		{"EBRecorder.Title", "EB Recorder 0.3.1", "EB Recorder 0.3.1"},
 		{"EBRecorder.Intro",
-		 "Version 0.3.0 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and selected Live/VOD audio encoders. Recording can be started manually or automatically together with the EB stream.",
-		 "Версия 0.3.0 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающий EB-видеокодировщик и выбранные аудиодорожки Live/VOD. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
+		 "Version 0.3.1 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and selected Live/VOD audio encoders. Recording can be started manually or automatically together with the EB stream.",
+		 "Версия 0.3.1 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающий EB-видеокодировщик и выбранные аудиодорожки Live/VOD. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
 		{"EBRecorder.Status.None",
 		 "No active Enhanced Broadcasting video encoders detected. Start an EB stream and refresh.",
 		 "Активные видеокодировщики Enhanced Broadcasting не найдены. Запусти EB-трансляцию и обнови список."},

@@ -164,7 +164,7 @@ See [BUILD.md](BUILD.md).
 - Windows x64 is the only tested release platform.
 - The plugin currently records the highest-resolution active EB rendition only; manual rendition selection is not implemented.
 - The EB encoder names are discovered from OBS's current Multitrack Video naming convention.
-- VOD and Live + VOD modes require OBS/Twitch to expose the active `multitrack video vod audio 0` encoder; if VOD Track is disabled or unavailable, those modes cannot start.
+- VOD and Live + VOD modes require OBS/Twitch to expose `multitrack video vod audio 0`; when the current OBS output settings cannot create a separate VOD track, those choices are disabled and a stale saved VOD selection falls back to Live.
 - The release has been validated against OBS Studio 32.2.2; future OBS changes can require compatibility updates.
 - Audio selection is limited to the EB Live/VOD encoders; arbitrary local OBS audio stems are not currently supported.
 - Per-track bitrate display depends on the metadata reader honoring Matroska `BPS` tags.

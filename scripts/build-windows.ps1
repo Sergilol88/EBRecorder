@@ -363,7 +363,29 @@ Copy-Item (Join-Path $Root 'UNINSTALL.cmd') $DistDir -Force
 Copy-Item (Join-Path $Root 'scripts\install.ps1') $DistDir -Force
 Copy-Item (Join-Path $Root 'scripts\uninstall.ps1') $DistDir -Force
 
-$ZipPath = Join-Path $Root 'EBRecorder-v0.3.0-Windows-x64.zip'
+$VersionFile = Join-Path $Root 'VERSION.txt'
+if (-not (Test-Path $VersionFile -PathType Leaf)) {
+    throw "VERSION.txt was not found at '$VersionFile'."
+}
+$PluginVersion = (Get-Content $VersionFile -Raw).Trim()
+if ($PluginVersion -notmatch '^\d+\.\d+\.\d+
+Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
+Compress-Archive -Path (Join-Path $DistDir '*') -DestinationPath $ZipPath -CompressionLevel Optimal
+
+$ReleaseSha256 = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$ShaPath = "$ZipPath.sha256"
+[IO.File]::WriteAllText($ShaPath, "$ReleaseSha256  $([IO.Path]::GetFileName($ZipPath))`r`n", (New-Object Text.UTF8Encoding($false)))
+
+Write-Host ''
+Write-Host 'Build complete.' -ForegroundColor Green
+Write-Host "Release archive: $ZipPath"
+Write-Host "SHA256:          $ReleaseSha256"
+Write-Host "Checksum file:   $ShaPath"
+Write-Host 'Install by extracting the release archive and running INSTALL.cmd.'
+) {
+    throw "VERSION.txt must contain a semantic version like 0.3.1. Found: '$PluginVersion'"
+}
+$ZipPath = Join-Path $Root "EBRecorder-v$PluginVersion-Windows-x64.zip"
 Remove-Item $ZipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $DistDir '*') -DestinationPath $ZipPath -CompressionLevel Optimal
 

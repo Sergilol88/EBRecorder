@@ -125,8 +125,8 @@ QString fallbackText(const char *key)
 	static const Translation translations[] = {
 		{"EBRecorder.Title", "EB Recorder 0.3.0", "EB Recorder 0.3.0"},
 		{"EBRecorder.Intro",
-		 "Version 0.3.0 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and audio encoders. Recording can be started manually or automatically together with the EB stream.",
-		 "Версия 0.3.0 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающие EB-кодировщики видео и звука. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
+		 "Version 0.3.0 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and selected Live/VOD audio encoders. Recording can be started manually or automatically together with the EB stream.",
+		 "Версия 0.3.0 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающий EB-видеокодировщик и выбранные аудиодорожки Live/VOD. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
 		{"EBRecorder.Status.None",
 		 "No active Enhanced Broadcasting video encoders detected. Start an EB stream and refresh.",
 		 "Активные видеокодировщики Enhanced Broadcasting не найдены. Запусти EB-трансляцию и обнови список."},
@@ -487,6 +487,11 @@ QString makeRecordingPath()
 	return QDir::toNativeSeparators(candidate);
 }
 
+// OBS's ffmpeg_muxer passes the AAC bitrate to FFmpeg, but Matroska has no
+// native TrackEntry bitrate field. After a clean stop, add standard Matroska
+// BPS tags for the audio TrackUIDs. The tags are appended without remuxing,
+// and a new SeekHead entry is fitted into FFmpeg's existing metadata reserve.
+// Encoded media packets and all cluster/cue offsets remain untouched.
 struct EbmlElement {
 	quint64 id = 0;
 	quint64 size = 0;

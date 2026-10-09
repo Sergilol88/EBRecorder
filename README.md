@@ -35,6 +35,7 @@ No extra video encoder is created by EB Recorder.
 - Optional **automatic recording start with the EB stream**.
 - Automatic stop before the Enhanced Broadcasting encoder pipeline is torn down.
 - Manual Start / Stop remains available.
+- Native OBS hotkeys for **EB Recorder: Start recording** and **EB Recorder: Stop recording**, configurable in **Settings → Hotkeys** and loaded per OBS profile.
 - English and Russian UI.
 - Does not modify Windows display mode, refresh rate, VRR, G-SYNC, NVIDIA settings, registry, services, power plans or PATH.
 

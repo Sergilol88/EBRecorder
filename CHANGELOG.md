@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.2](release-notes/v0.3.2.md)
+
+Native OBS hotkeys.
+
+- Added OBS frontend hotkeys for starting and stopping EB Recorder.
+- Hotkey bindings are loaded from the active OBS profile and refreshed on profile changes.
+- Start hotkey reuses the same TOP EB and Live/VOD selection logic as the dialog.
+- Stop hotkey uses the normal clean-stop path, including Matroska `BPS` metadata finalization.
+- No global keyboard hooks or additional encoders are introduced.
+
 ## [0.3.1](release-notes/v0.3.1.md)
 
 Audio-track and metadata update.

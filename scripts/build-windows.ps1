@@ -244,7 +244,7 @@ Write-Host "Visual Studio path: $($EnvInfo.VSPath)"
 Write-Host "CMake: $($EnvInfo.CMakeVersionLine)"
 Write-Host "CMake path: $CMakeExe"
 Write-Host ''
-Write-Host 'EB Recorder r6.3 production build strategy:'
+Write-Host 'EB Recorder r6.4 production build strategy:'
 Write-Host '  - no obs-plugintemplate bootstrap'
 Write-Host '  - one OBS x64 SDK build only'
 Write-Host '  - no nested Win32 build'
@@ -322,7 +322,7 @@ if (-not (Test-Path $ObsDepsPrefix)) {
 $PrefixPath = "$ObsSdk;$ObsDepsPrefix;$QtPrefix"
 
 Write-Host ''
-Write-Host 'EB Recorder build package: r6.3 (production Release)' -ForegroundColor Cyan
+Write-Host 'EB Recorder build package: r6.4 (production Release)' -ForegroundColor Cyan
 Write-Host 'Configuring EB Recorder plugin...'
 $PluginConfigureArgs = @(
     '-S', $Root,

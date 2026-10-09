@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-$PluginVersion = '0.3.1'
-$BuildRevision = 'r6.3'
+$PluginVersion = '0.3.2'
+$BuildRevision = 'r6.4'
 
 if (Get-Process obs64 -ErrorAction SilentlyContinue) {
     Write-Host 'OBS Studio is running. Close OBS and run the installer again.' -ForegroundColor Yellow

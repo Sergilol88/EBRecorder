@@ -46,12 +46,14 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("eb-recorder", "en-US")
 
 namespace {
-constexpr const char *kVersion = "0.3.1";
+constexpr const char *kVersion = "0.3.2";
 constexpr const char *kEbEncoderPrefix = "multitrack video video encoder ";
 constexpr const char *kEbLiveAudioEncoderName = "multitrack video live audio 0";
 constexpr const char *kEbVodAudioEncoderName = "multitrack video vod audio 0";
 constexpr const char *kLocalOutputName = "eb-recorder local output";
 constexpr const char *kLocalOutputType = "ffmpeg_muxer";
+constexpr const char *kStartHotkeyName = "EBRecorder.StartRecording";
+constexpr const char *kStopHotkeyName = "EBRecorder.StopRecording";
 // Keep Matroska clusters short so an interrupted session leaves only a small
 // tail at risk.  The MKV container itself does not depend on a final MOOV-like
 // index to remain readable after an abrupt process/power loss.
@@ -109,6 +111,7 @@ bool g_cleanStopRequested = false;
 bool g_autoStartPending = false;
 qint64 g_autoStartDeadlineMs = 0;
 QTimer *g_autoStartTimer = nullptr;
+obs_hotkey_pair_id g_recordingHotkeys = OBS_INVALID_HOTKEY_PAIR_ID;
 
 QString fallbackText(const char *key)
 {
@@ -122,10 +125,10 @@ QString fallbackText(const char *key)
 	};
 
 	static const Translation translations[] = {
-		{"EBRecorder.Title", "EB Recorder 0.3.1", "EB Recorder 0.3.1"},
+		{"EBRecorder.Title", "EB Recorder 0.3.2", "EB Recorder 0.3.2"},
 		{"EBRecorder.Intro",
-		 "Version 0.3.1 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and selected Live/VOD audio encoders. Recording can be started manually or automatically together with the EB stream.",
-		 "Версия 0.3.1 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающий EB-видеокодировщик и выбранные аудиодорожки Live/VOD. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
+		 "Version 0.3.2 records the active highest-resolution Enhanced Broadcasting rendition to crash-resilient Matroska (MKV) by reusing the existing EB video and selected Live/VOD audio encoders. Recording can be started manually or automatically together with the EB stream.",
+		 "Версия 0.3.2 записывает активный поток Enhanced Broadcasting с максимальным разрешением в устойчивый к аварийному завершению Matroska (MKV), повторно используя уже работающий EB-видеокодировщик и выбранные аудиодорожки Live/VOD. Запись можно запускать вручную или автоматически вместе с EB-трансляцией."},
 		{"EBRecorder.Status.None",
 		 "No active Enhanced Broadcasting video encoders detected. Start an EB stream and refresh.",
 		 "Активные видеокодировщики Enhanced Broadcasting не найдены. Запусти EB-трансляцию и обнови список."},
@@ -193,6 +196,8 @@ QString fallbackText(const char *key)
 		{"EBRecorder.StartRecording", "Start recording", "Начать запись"},
 		{"EBRecorder.StopRecording", "Stop recording", "Остановить запись"},
 		{"EBRecorder.Close", "Close", "Закрыть"},
+		{"EBRecorder.Hotkey.Start", "EB Recorder: Start recording", "EB Recorder: Начать запись"},
+		{"EBRecorder.Hotkey.Stop", "EB Recorder: Stop recording", "EB Recorder: Остановить запись"},
 	};
 
 	for (const auto &entry : translations) {
@@ -1457,6 +1462,130 @@ void setAudioSelection(AudioSelection selection)
 		armAutomaticRecording("audio selection changed during active stream");
 }
 
+bool startRecordingFromCurrentEb(QString &error, const char *reason)
+{
+	releaseInactiveRecordingOutput();
+	if (recordingOutputActive()) {
+		error = ebTr("EBRecorder.Error.AlreadyActive");
+		return false;
+	}
+
+	const EbAudioState audio = getEbAudioState();
+	const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
+	normalizeAudioSelectionForVodAvailability(audio, vodConfig, reason);
+
+	const auto encoders = getEbEncoders();
+	const EncoderInfo *top = findTopEncoder(encoders);
+	if (!top) {
+		error = ebTr("EBRecorder.Error.NoTop");
+		return false;
+	}
+	if (!selectedAudioReady(audio)) {
+		error = ebTr("EBRecorder.Error.NoAudio").arg(audioSelectionLabel(g_audioSelection));
+		return false;
+	}
+
+	blog(LOG_INFO, "[EB Recorder] recording start requested (%s)", reason ? reason : "unspecified");
+	return startLocalRecording(*top, error);
+}
+
+obs_data_array_t *loadFrontendHotkeyBindings(config_t *config, const char *name)
+{
+	obs_data_array_t *bindings = obs_data_array_create();
+	if (!config || !name)
+		return bindings;
+
+	const char *json = config_get_string(config, "Hotkeys", name);
+	if (!json || !*json)
+		return bindings;
+
+	obs_data_t *data = obs_data_create_from_json(json);
+	if (!data)
+		return bindings;
+
+	obs_data_array_t *saved = obs_data_get_array(data, "bindings");
+	if (saved) {
+		obs_data_array_release(bindings);
+		bindings = saved;
+	}
+	obs_data_release(data);
+	return bindings;
+}
+
+void loadRecordingHotkeyBindings()
+{
+	if (g_recordingHotkeys == OBS_INVALID_HOTKEY_PAIR_ID)
+		return;
+
+	config_t *config = obs_frontend_get_profile_config();
+	obs_data_array_t *startBindings = loadFrontendHotkeyBindings(config, kStartHotkeyName);
+	obs_data_array_t *stopBindings = loadFrontendHotkeyBindings(config, kStopHotkeyName);
+	obs_hotkey_pair_load(g_recordingHotkeys, startBindings, stopBindings);
+	obs_data_array_release(startBindings);
+	obs_data_array_release(stopBindings);
+	blog(LOG_INFO, "[EB Recorder] recording hotkey bindings loaded from current OBS profile");
+}
+
+bool startRecordingHotkey(void *, obs_hotkey_pair_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed || recordingOutputActive())
+		return false;
+
+	QString error;
+	if (!startRecordingFromCurrentEb(error, "hotkey")) {
+		blog(LOG_INFO, "[EB Recorder] start hotkey ignored: %s", error.toUtf8().constData());
+		refreshDialogIfOpen();
+		return false;
+	}
+
+	cancelPendingAutoStart("recording started by hotkey");
+	blog(LOG_INFO, "[EB Recorder] recording started by hotkey");
+	refreshDialogIfOpen();
+	return true;
+}
+
+bool stopRecordingHotkey(void *, obs_hotkey_pair_id, obs_hotkey_t *, bool pressed)
+{
+	if (!pressed || !recordingOutputActive())
+		return false;
+
+	cancelPendingAutoStart("recording stopped by hotkey");
+	stopLocalRecording(false, "hotkey");
+	blog(LOG_INFO, "[EB Recorder] recording stop requested by hotkey");
+	refreshDialogIfOpen();
+	return true;
+}
+
+void registerRecordingHotkeys()
+{
+	if (g_recordingHotkeys != OBS_INVALID_HOTKEY_PAIR_ID)
+		return;
+
+	const QByteArray startDescription = ebTr("EBRecorder.Hotkey.Start").toUtf8();
+	const QByteArray stopDescription = ebTr("EBRecorder.Hotkey.Stop").toUtf8();
+	g_recordingHotkeys = obs_hotkey_pair_register_frontend(
+		kStartHotkeyName, startDescription.constData(), kStopHotkeyName, stopDescription.constData(),
+		startRecordingHotkey, stopRecordingHotkey, nullptr, nullptr);
+
+	if (g_recordingHotkeys == OBS_INVALID_HOTKEY_PAIR_ID) {
+		blog(LOG_WARNING, "[EB Recorder] failed to register recording hotkeys");
+		return;
+	}
+
+	loadRecordingHotkeyBindings();
+	blog(LOG_INFO, "[EB Recorder] recording hotkeys registered");
+}
+
+void unregisterRecordingHotkeys()
+{
+	if (g_recordingHotkeys == OBS_INVALID_HOTKEY_PAIR_ID)
+		return;
+
+	obs_hotkey_pair_unregister(g_recordingHotkeys);
+	g_recordingHotkeys = OBS_INVALID_HOTKEY_PAIR_ID;
+	blog(LOG_INFO, "[EB Recorder] recording hotkeys unregistered");
+}
+
 class EBRecorderDialog final : public QDialog {
 public:
 	explicit EBRecorderDialog(QWidget *parent) : QDialog(parent)
@@ -1598,24 +1727,11 @@ private:
 
 	void startRecording()
 	{
-		const EbAudioState audio = getEbAudioState();
-		const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
-		if (normalizeAudioSelectionForVodAvailability(audio, vodConfig, "manual start")) {
-			QSignalBlocker blocker(audioSelectionCombo_);
-			audioSelectionCombo_->setCurrentIndex(static_cast<int>(g_audioSelection));
-		}
-
-		const auto encoders = getEbEncoders();
-		const EncoderInfo *top = findTopEncoder(encoders);
-		if (!top) {
-			setRecordingError(ebTr("EBRecorder.Error.NoTop"));
-			refreshEncoders(true);
-			return;
-		}
-
 		QString error;
-		if (!startLocalRecording(*top, error))
+		if (!startRecordingFromCurrentEb(error, "dialog button"))
 			setRecordingError(error);
+		else
+			cancelPendingAutoStart("recording started from dialog");
 		refreshEncoders(true);
 	}
 
@@ -1669,7 +1785,8 @@ private:
 		const EbAudioState audio = getEbAudioState();
 		const VodTrackConfigState vodConfig = getObsVodTrackConfigState();
 		const bool vodSelectable = vodSelectionAllowed(audio, vodConfig);
-		if (normalizeAudioSelectionForVodAvailability(audio, vodConfig, "dialog refresh")) {
+		normalizeAudioSelectionForVodAvailability(audio, vodConfig, "dialog refresh");
+		if (audioSelectionCombo_->currentIndex() != static_cast<int>(g_audioSelection)) {
 			QSignalBlocker blocker(audioSelectionCombo_);
 			audioSelectionCombo_->setCurrentIndex(static_cast<int>(g_audioSelection));
 		}
@@ -1850,6 +1967,9 @@ void frontendEvent(enum obs_frontend_event event, void *)
 		if (g_autoRecordEnabled)
 			armAutomaticRecording("OBS streaming started");
 		break;
+	case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
+		loadRecordingHotkeyBindings();
+		break;
 	default:
 		return;
 	}
@@ -1897,6 +2017,7 @@ bool obs_module_load(void)
 	logLocaleDiagnostics();
 	initializeSettingsPath();
 	g_obsExiting = false;
+	registerRecordingHotkeys();
 	obs_frontend_add_tools_menu_item("EB Recorder", openDialog, nullptr);
 	obs_frontend_add_event_callback(frontendEvent, nullptr);
 	g_frontendCallbackRegistered = true;
@@ -1927,6 +2048,7 @@ void obs_module_unload(void)
 	     g_dialog.isNull() ? "null" : "alive", recordingOutputActive() ? "active" : "inactive");
 
 	cancelPendingAutoStart("module unload");
+	unregisterRecordingHotkeys();
 	if (g_autoStartTimer) {
 		delete g_autoStartTimer;
 		g_autoStartTimer = nullptr;

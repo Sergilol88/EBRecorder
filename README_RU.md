@@ -43,7 +43,7 @@ EB Recorder находит уже активные EB-кодировщики OBS
 
 Текущая версия протестирована с:
 
-- OBS Studio `32.2.2` x64 на Windows
+- OBS Studio `32.2.2` x64 на Windows (запись EB проверена); OBS Studio `33.0.0` (загрузка из нового расположения подтверждена, запись нужно проверить отдельно)
 - Twitch Enhanced Broadcasting / Multitrack Video
 - NVIDIA NVENC
 - TOP-поток: HEVC `2560x1440 60 fps`, около `9000 кбит/с`
@@ -60,11 +60,15 @@ EB Recorder находит уже активные EB-кодировщики OBS
 5. Запустите `INSTALL.cmd`.
 6. Запустите OBS и откройте **Сервис -> EB Recorder**.
 
-Плагин устанавливается изолированно в:
+Установщик использует официальную структуру сторонних плагинов OBS 33+:
 
 ```text
-C:\ProgramData\obs-studio\plugins\eb-recorder\
+C:\ProgramData\obs-studio\plugins\eb-recorder\eb-recorder.dll
+C:\ProgramData\obs-studio\plugins\eb-recorder\data\locale\en-US.ini
+C:\ProgramData\obs-studio\plugins\eb-recorder\data\locale\ru-RU.ini
 ```
+
+Старые установки 0.3.2 с DLL в `bin\64bit` заменяются атомарно с откатом при ошибке. Для OBS 32.x следует оставить EB Recorder 0.3.2: OBS 32 не поддерживает новую структуру.
 
 Установщик не зависит от папки, в которой установлен OBS, поэтому обычную или Steam-версию OBS можно держать на любом диске.
 
@@ -72,39 +76,17 @@ C:\ProgramData\obs-studio\plugins\eb-recorder\
 
 Для удаления закройте OBS и запустите `UNINSTALL.cmd` из распакованного release-архива.
 
-### Установка в portable OBS
+### Установка в portable OBS (OBS 33+)
 
-`INSTALL.cmd` рассчитан на обычную и Steam-установку OBS. Если OBS работает в portable-режиме, EB Recorder нужно установить вручную в папку portable OBS.
-
-Из распакованного архива EB Recorder:
-
-1. Скопируйте `eb-recorder\bin\64bit\eb-recorder.dll` сюда:
+Для переносной OBS 33+ скопируйте папку `eb-recorder` из архива релиза в `<OBS Portable>\plugins\`. Итог:
 
 ```text
-<OBS Portable>\obs-plugins\64bit\eb-recorder.dll
+<OBS Portable>\plugins\eb-recorder\eb-recorder.dll
+<OBS Portable>\plugins\eb-recorder\data\locale\en-US.ini
+<OBS Portable>\plugins\eb-recorder\data\locale\ru-RU.ini
 ```
 
-2. Создайте эту папку, если её ещё нет:
-
-```text
-<OBS Portable>\data\obs-plugins\eb-recorder\locale\
-```
-
-3. Скопируйте `en-US.ini` и `ru-RU.ini` из `eb-recorder\data\locale\` в эту папку `locale`.
-4. Запустите portable OBS и откройте **Сервис -> EB Recorder**.
-
-Итоговая структура должна выглядеть так:
-
-```text
-<OBS Portable>\
-├─ bin\64bit\obs64.exe
-├─ obs-plugins\64bit\eb-recorder.dll
-└─ data\obs-plugins\eb-recorder\locale\
-   ├─ en-US.ini
-   └─ ru-RU.ini
-```
-
-Для portable-установки удаление тоже выполняется вручную. Закройте OBS, удалите `eb-recorder.dll` и папку `data\obs-plugins\eb-recorder`.
+Обычный `INSTALL.cmd` устанавливает плагин в ProgramData, а не в portable OBS. Для удаления из portable OBS закройте программу и удалите папку `<OBS Portable>\plugins\eb-recorder`.
 
 ## Использование
 

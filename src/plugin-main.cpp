@@ -46,7 +46,7 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("eb-recorder", "en-US")
 
 namespace {
-constexpr const char *kVersion = "0.3.2";
+constexpr const char *kVersion = "0.3.3";
 constexpr const char *kEbEncoderPrefix = "multitrack video video encoder ";
 constexpr const char *kEbLiveAudioEncoderName = "multitrack video live audio 0";
 constexpr const char *kEbVodAudioEncoderName = "multitrack video vod audio 0";

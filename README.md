@@ -43,7 +43,7 @@ No extra video encoder is created by EB Recorder.
 
 The current release has been tested with:
 
-- OBS Studio `32.2.2` x64 on Windows
+- OBS Studio `32.2.2` x64 on Windows (EB recording tested); OBS Studio `33.0.0` (new plugin layout and load verified, recording still to be retested)
 - Twitch Enhanced Broadcasting / Multitrack Video
 - NVIDIA NVENC
 - TOP rendition: HEVC `2560x1440 60 fps`, approximately `9000 kbps`
@@ -60,11 +60,15 @@ Other Enhanced Broadcasting encoder combinations may work, but are not yet part 
 5. Run `INSTALL.cmd`.
 6. Start OBS and open **Tools -> EB Recorder**.
 
-The installer uses this isolated OBS plugin directory:
+The installer uses the official OBS 33+ third-party plugin layout:
 
 ```text
-C:\ProgramData\obs-studio\plugins\eb-recorder\
+C:\ProgramData\obs-studio\plugins\eb-recorder\eb-recorder.dll
+C:\ProgramData\obs-studio\plugins\eb-recorder\data\locale\en-US.ini
+C:\ProgramData\obs-studio\plugins\eb-recorder\data\locale\ru-RU.ini
 ```
+
+Older v0.3.2 installations under `bin\64bit` are replaced atomically (with rollback on failure). For OBS 32.x, keep using EB Recorder v0.3.2; OBS 32 does not load this new format.
 
 It does not depend on the OBS installation folder, so regular OBS installations and Steam installations can be located on any drive.
 
@@ -72,39 +76,17 @@ It does not create registry entries, services, scheduled tasks or PATH changes.
 
 To remove EB Recorder, close OBS and run `UNINSTALL.cmd` from the extracted release package.
 
-### Portable OBS installation
+### Portable OBS installation (OBS 33+)
 
-`INSTALL.cmd` is intended for regular and Steam installations. If OBS is running in portable mode, install EB Recorder manually into the portable OBS folder.
-
-From the extracted EB Recorder release package:
-
-1. Copy `eb-recorder\bin\64bit\eb-recorder.dll` to:
+For a portable OBS 33+ installation, copy the extracted release folder `eb-recorder` to `<OBS Portable>\plugins\`. The result must be:
 
 ```text
-<OBS Portable>\obs-plugins\64bit\eb-recorder.dll
+<OBS Portable>\plugins\eb-recorder\eb-recorder.dll
+<OBS Portable>\plugins\eb-recorder\data\locale\en-US.ini
+<OBS Portable>\plugins\eb-recorder\data\locale\ru-RU.ini
 ```
 
-2. Create this folder if it does not already exist:
-
-```text
-<OBS Portable>\data\obs-plugins\eb-recorder\locale\
-```
-
-3. Copy `en-US.ini` and `ru-RU.ini` from `eb-recorder\data\locale\` into that `locale` folder.
-4. Start the portable OBS build and open **Tools -> EB Recorder**.
-
-The resulting portable layout should look like this:
-
-```text
-<OBS Portable>\
-├─ bin\64bit\obs64.exe
-├─ obs-plugins\64bit\eb-recorder.dll
-└─ data\obs-plugins\eb-recorder\locale\
-   ├─ en-US.ini
-   └─ ru-RU.ini
-```
-
-For portable installations, removal is also manual: close OBS and delete the EB Recorder DLL and its `data\obs-plugins\eb-recorder` folder.
+The normal `INSTALL.cmd` targets ProgramData (not portable OBS). Removal in portable mode is manual: close OBS, then delete the `<OBS Portable>\plugins\eb-recorder` directory.
 
 ## Usage
 

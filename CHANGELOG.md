@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.3](release-notes/v0.3.3.md)
+
+OBS Studio 33+ installation compatibility.
+
+- Updated the DLL location to the root of the plugin folder in ProgramData (OBS 33+ and future OBS versions).
+- Migrates existing legacy `bin\64bit` installs with an atomic folder swap and rollback on failure.
+- Updated CMake packaging, build checks, and Windows portable OBS installation instructions.
+- No changes to encoder reuse, audio tracks, recording, or hotkeys. OBS 32.x users should stay on v0.3.2.
+
+
 ## [0.3.2](release-notes/v0.3.2.md)
 
 Native OBS hotkeys.

@@ -8,11 +8,13 @@ The repository contains a self-contained Windows build helper for the currently 
 - Visual Studio 2026 (`18.x`) with **Desktop development with C++**
 - Visual Studio bundled CMake `4.2+`
 - Windows SDK `10.0.26100`
-- OBS Studio source `32.2.2`
+- OBS Studio SDK source `32.2.2` (pinned reproducible build baseline; OBS 33+ plugin layout)
 - obs-deps `2026-07-15` x64
 - Qt dependency archive from obs-deps `2026-07-15`
 
 The build helper verifies downloaded archives by SHA-256 before use.
+
+OBS 33+ packaging places `eb-recorder.dll` directly in the `eb-recorder` folder alongside `data/`. The pinned OBS 32 SDK is intentionally unchanged for this layout-only update: the encoder/output APIs used by the plugin did not change between OBS 32.2.2 and 33.0.0. Run a recording smoke test before release.
 
 ## Normal build
 

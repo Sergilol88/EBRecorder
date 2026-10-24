@@ -322,7 +322,7 @@ if (-not (Test-Path $ObsDepsPrefix)) {
 $PrefixPath = "$ObsSdk;$ObsDepsPrefix;$QtPrefix"
 
 Write-Host ''
-Write-Host 'EB Recorder build package: r6.4 (production Release)' -ForegroundColor Cyan
+Write-Host 'EB Recorder build package: r6.5 (production Release)' -ForegroundColor Cyan
 Write-Host 'Configuring EB Recorder plugin...'
 $PluginConfigureArgs = @(
     '-S', $Root,
@@ -344,7 +344,7 @@ $PluginInstallArgs = @('--install', $PluginBuild, '--config', 'Release', '--pref
 Invoke-CMake $PluginInstallArgs 'EB Recorder install failed.'
 
 $PluginStaging = Join-Path $StagingDir 'eb-recorder'
-$BuiltDll = Join-Path $PluginStaging 'bin\64bit\eb-recorder.dll'
+$BuiltDll = Join-Path $PluginStaging 'eb-recorder.dll'
 if (-not (Test-Path $BuiltDll)) {
     throw "Built DLL was not found at '$BuiltDll'."
 }

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 4.2...4.3)
 
-project(eb-recorder VERSION 0.3.2 LANGUAGES CXX)
+project(eb-recorder VERSION 0.3.3 LANGUAGES CXX)
 
 find_package(libobs CONFIG REQUIRED)
 find_package(obs-frontend-api CONFIG REQUIRED)
@@ -32,9 +32,9 @@ set_target_properties(
 
 install(
   TARGETS eb-recorder
-  RUNTIME DESTINATION "eb-recorder/bin/64bit"
-  LIBRARY DESTINATION "eb-recorder/bin/64bit"
-  ARCHIVE DESTINATION "eb-recorder/bin/64bit"
+  RUNTIME DESTINATION "eb-recorder"
+  LIBRARY DESTINATION "eb-recorder"
+  ARCHIVE DESTINATION "eb-recorder"
 )
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION "eb-recorder/data")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" DESTINATION "eb-recorder")

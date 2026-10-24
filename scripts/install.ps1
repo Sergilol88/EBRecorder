@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-$PluginVersion = '0.3.2'
-$BuildRevision = 'r6.4'
+$PluginVersion = '0.3.3'
+$BuildRevision = 'r6.5'
 
 if (Get-Process obs64 -ErrorAction SilentlyContinue) {
     Write-Host 'OBS Studio is running. Close OBS and run the installer again.' -ForegroundColor Yellow
@@ -14,10 +14,11 @@ if (-not (Test-Path $Source -PathType Container)) {
     throw "Plugin folder not found: $Source"
 }
 
-# Use the isolated ProgramData plugin layout validated with OBS Studio 32.2.2:
-#   %ProgramData%\obs-studio\plugins\eb-recorder\bin\64bit\eb-recorder.dll
+# OBS Studio 33+ official third-party plugin layout (OBS 34 removes the legacy layout):
+#   %ProgramData%\obs-studio\plugins\eb-recorder\eb-recorder.dll
 #   %ProgramData%\obs-studio\plugins\eb-recorder\data\...
-$SourceDll = Join-Path $Source 'bin\64bit\eb-recorder.dll'
+# OBS 32 users should continue using EB Recorder v0.3.2.
+$SourceDll = Join-Path $Source 'eb-recorder.dll'
 $SourceData = Join-Path $Source 'data'
 $SourceEnLocale = Join-Path $SourceData 'locale\en-US.ini'
 $SourceRuLocale = Join-Path $SourceData 'locale\ru-RU.ini'
@@ -57,7 +58,7 @@ if (-not (Test-Path (Join-Path $NewTarget 'VERSION.txt') -PathType Leaf)) {
     Set-Content -Path (Join-Path $NewTarget 'VERSION.txt') -Value $PluginVersion -Encoding ASCII
 }
 
-$InstalledDll = Join-Path $NewTarget 'bin\64bit\eb-recorder.dll'
+$InstalledDll = Join-Path $NewTarget 'eb-recorder.dll'
 $InstalledEnLocale = Join-Path $NewTarget 'data\locale\en-US.ini'
 $InstalledRuLocale = Join-Path $NewTarget 'data\locale\ru-RU.ini'
 foreach ($Required in @($InstalledDll, $InstalledEnLocale, $InstalledRuLocale)) {
@@ -75,7 +76,7 @@ try {
     Move-Item $NewTarget $Target
 
     # Validate the final paths before deleting the rollback copy.
-    $FinalDll = Join-Path $Target 'bin\64bit\eb-recorder.dll'
+    $FinalDll = Join-Path $Target 'eb-recorder.dll'
     $FinalEnLocale = Join-Path $Target 'data\locale\en-US.ini'
     $FinalRuLocale = Join-Path $Target 'data\locale\ru-RU.ini'
     foreach ($Required in @($FinalDll, $FinalEnLocale, $FinalRuLocale)) {
@@ -84,10 +85,10 @@ try {
         }
     }
 
-    # A flat-layout DLL from r4.2/r4.2.1 must not exist in the new installation.
-    $UnexpectedFlatDll = Join-Path $Target 'eb-recorder.dll'
-    if (Test-Path $UnexpectedFlatDll -PathType Leaf) {
-        throw "Unexpected flat-layout DLL remained after installation: $UnexpectedFlatDll"
+    # No stale legacy DLL may remain after migrating from v0.3.2.
+    $UnexpectedLegacyDll = Join-Path $Target 'bin\64bit\eb-recorder.dll'
+    if (Test-Path $UnexpectedLegacyDll -PathType Leaf) {
+        throw "Legacy DLL remained after installation: $UnexpectedLegacyDll"
     }
 
     Remove-Item $BackupTarget -Recurse -Force -ErrorAction SilentlyContinue
@@ -109,9 +110,9 @@ if ($Updating) {
 } else {
     Write-Host "Installed EB Recorder $PluginVersion ($BuildRevision)" -ForegroundColor Green
 }
-Write-Host 'Layout: ProgramData plugin layout (bin\64bit)'
+Write-Host 'Layout: OBS Studio 33+ ProgramData root DLL'
 Write-Host "Plugin folder: $Target"
-Write-Host "DLL: $(Join-Path $Target 'bin\64bit\eb-recorder.dll')"
+Write-Host "DLL: $(Join-Path $Target 'eb-recorder.dll')"
 Write-Host "Locale: $(Join-Path $Target 'data\locale')"
 Write-Host 'The previous eb-recorder folder was replaced completely; no stale DLL from an older build remains.'
 Write-Host 'Removal is simple: close OBS and run UNINSTALL.cmd. It removes the plugin and its small OBS plugin_config settings folder.'

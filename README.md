@@ -76,6 +76,10 @@ It does not create registry entries, services, scheduled tasks or PATH changes.
 
 To remove EB Recorder, close OBS and run `UNINSTALL.cmd` from the extracted release package.
 
+### Existing installation backup
+
+If installation reports that `eb-recorder.__old` already exists, close OBS and move that folder from `C:\ProgramData\obs-studio\plugins` to a safe location outside the OBS plugins folder, such as your Desktop. Run `INSTALL.cmd` again and keep the backup until the new version is verified. The installer deliberately preserves this recovery copy.
+
 ### Portable OBS installation (OBS 33+)
 
 For a portable OBS 33+ installation, copy the extracted release folder `eb-recorder` to `<OBS Portable>\plugins\`. The result must be:
@@ -166,10 +170,11 @@ Please use GitHub Issues. Include:
 
 ## Project status
 
-`v0.3.0` is the first feature-complete public baseline. The current release, **v0.3.1**, adds selectable EB Live/VOD audio reuse, VOD-aware UI, and per-track Matroska bitrate metadata while keeping the zero-extra-encoder architecture.
+The current release, **v0.3.4**, improves recording error reporting, finalization with the dialog closed, and installer rollback safety. It keeps the existing TOP EB video and Live/VOD audio encoder reuse architecture.
 
 ## License
 
 EB Recorder is licensed under the [GNU General Public License v2.0 or later](LICENSE).
 
 OBS Studio is a separate project. Twitch and Enhanced Broadcasting are trademarks/services of their respective owners. EB Recorder is not affiliated with or endorsed by OBS Studio or Twitch.
+

@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$PluginVersion = '0.3.3'
+$PluginVersion = '0.3.4'
 $BuildRevision = 'r6.5'
 
 if (Get-Process obs64 -ErrorAction SilentlyContinue) {
@@ -51,7 +51,7 @@ $OldVersion = if (Test-Path $OldVersionFile -PathType Leaf) {
 # installations, so stale DLL copies cannot survive the update.
 Remove-Item $NewTarget -Recurse -Force -ErrorAction SilentlyContinue
 if (Test-Path $BackupTarget) {
-    throw "A previous installation backup exists at '$BackupTarget'. Recover or move it before retrying installation."
+    throw "A previous installation backup exists at '$BackupTarget'. Close OBS, move this backup outside the OBS plugins folder (for example, to your Desktop), then run INSTALL.cmd again. Keep the backup until the new version is verified."
 }
 New-Item -ItemType Directory -Path $NewTarget -Force | Out-Null
 Copy-Item (Join-Path $Source '*') $NewTarget -Recurse -Force

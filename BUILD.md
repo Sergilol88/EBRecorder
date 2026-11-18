@@ -60,6 +60,9 @@ The lifecycle tests cover worker-thread stop delivery, stop-before-deactivation,
 closed-dialog metadata finalization, error preservation, and retired callbacks.
 They do not replace a live EB recording smoke test on supported OBS versions.
 
+The pinned third-party OBS SDK keeps compiler warnings enabled but does not
+treat them as errors, so newer MSVC diagnostics do not break the SDK build.
+
 ## Clean build
 
 ```text

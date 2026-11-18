@@ -292,6 +292,9 @@ if (-not ((Test-Path (Join-Path $ObsSdk 'lib\cmake\libobs')) -and (Test-Path (Jo
         '-A', 'x64,version=10.0.26100.0',
         '-DOBS_CMAKE_VERSION:STRING=3.0.0',
         "-DOBS_VERSION_OVERRIDE:STRING=$ObsVersion",
+        # New MSVC versions can introduce warnings in the pinned third-party
+        # SDK. Keep those diagnostics visible without treating them as errors.
+        '-DCMAKE_COMPILE_WARNING_AS_ERROR:BOOL=OFF',
         '-DENABLE_PLUGINS:BOOL=OFF',
         '-DENABLE_FRONTEND:BOOL=OFF',
         '-DENABLE_SCRIPTING:BOOL=OFF',

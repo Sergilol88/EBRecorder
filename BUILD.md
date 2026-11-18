@@ -42,6 +42,24 @@ EBRecorder-vX.Y.Z-Windows-x64.zip.sha256
 
 The plugin binary is built as a production `Release` target. Debug symbols are not shipped in the user archive. The locally cached OBS development SDK may still use `RelWithDebInfo`; it is a build-only dependency and is never included in the release package.
 
+## Regression tests
+
+Run installer fault-injection tests without OBS or administrator permissions:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\install.Tests.ps1
+```
+
+Build and run the headless libobs/Qt recording lifecycle tests:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1 -RunTests
+```
+
+The lifecycle tests cover worker-thread stop delivery, stop-before-deactivation,
+closed-dialog metadata finalization, error preservation, and retired callbacks.
+They do not replace a live EB recording smoke test on supported OBS versions.
+
 ## Clean build
 
 ```text
@@ -67,3 +85,4 @@ All cache/build/output folders are excluded from Git.
 ## Notes
 
 The helper intentionally builds only the x64 OBS development targets needed by EB Recorder and patches the local extracted OBS source tree to skip the nested Win32 helper build. The patch is applied only inside `.cache/`; it does not modify a system OBS installation or an external OBS source checkout.
+

@@ -20,6 +20,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMetaObject>
 #include <QPointer>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -96,6 +97,9 @@ enum class RecordingUiState {
 };
 
 obs_output_t *g_recordingOutput = nullptr;
+QObject *g_recordingEventOwner = nullptr;
+QTimer *g_recordingStopTimer = nullptr;
+bool g_recordingStopReceived = false;
 QString g_recordingPath;
 QString g_recordingError;
 RecordingUiState g_recordingUiState = RecordingUiState::Idle;
@@ -181,6 +185,8 @@ QString fallbackText(const char *key)
 		 "OBS не подключил существующие EB-кодировщики к локальному output."},
 		{"EBRecorder.Error.OutputStart", "OBS could not start the local Matroska output%1.",
 		 "OBS не смог запустить локальный Matroska output%1."},
+		{"EBRecorder.Error.OutputStopped", "Recording stopped with OBS error code %1",
+		 "Запись остановлена с кодом ошибки OBS %1"},
 		{"EBRecorder.Error.Path", "Could not prepare the recording folder.", "Не удалось подготовить папку записи."},
 		{"EBRecorder.Col.Index", "Index", "Индекс"},
 		{"EBRecorder.Col.Codec", "Codec", "Кодек"},
@@ -997,9 +1003,28 @@ bool recordingOutputActive()
 	return g_recordingOutput && obs_output_active(g_recordingOutput);
 }
 
+void recordingOutputStopped(void *param, calldata_t *data);
+void refreshDialogIfOpen();
+void setRecordingError(const QString &error);
+
+void disconnectRecordingOutputEvents(obs_output_t *output)
+{
+	if (!g_recordingStopTimer)
+		return;
+
+	// Disconnect waits for any OBS callback in progress before its Qt context
+	// is retired. Queued callbacks also check the context identity below.
+	signal_handler_disconnect(obs_output_get_signal_handler(output), "stop", recordingOutputStopped,
+				  g_recordingStopTimer);
+	g_recordingStopTimer->stop();
+	g_recordingStopTimer->deleteLater();
+	g_recordingStopTimer = nullptr;
+	g_recordingStopReceived = false;
+}
+
 void releaseInactiveRecordingOutput()
 {
-	if (!g_recordingOutput || obs_output_active(g_recordingOutput))
+	if (!g_recordingOutput || !g_recordingStopReceived || obs_output_active(g_recordingOutput))
 		return;
 
 	const QString finalizedPath = g_recordingPath;
@@ -1007,6 +1032,7 @@ void releaseInactiveRecordingOutput()
 	const bool updateBitrateMetadata = g_audioBitrateMetadataPending && g_cleanStopRequested;
 
 	blog(LOG_INFO, "[EB Recorder] releasing inactive local output");
+	disconnectRecordingOutputEvents(g_recordingOutput);
 	obs_output_release(g_recordingOutput);
 	g_recordingOutput = nullptr;
 
@@ -1030,6 +1056,47 @@ void releaseInactiveRecordingOutput()
 	}
 }
 
+void recordingOutputStopped(void *param, calldata_t *data)
+{
+	auto *context = static_cast<QTimer *>(param);
+	const int code = static_cast<int>(calldata_int(data, "code"));
+	const char *lastError = calldata_string(data, "last_error");
+	const QString detail = QString::fromUtf8(lastError ? lastError : "");
+	// OBS emits this from a worker thread. Never mutate UI/global recording
+	// state, release the output, or modify its file on that thread.
+	QMetaObject::invokeMethod(context, [context, code, detail]() {
+		if (context != g_recordingStopTimer || !g_recordingOutput)
+			return;
+		g_recordingStopReceived = true;
+		g_cleanStopRequested = g_cleanStopRequested && code == OBS_OUTPUT_SUCCESS;
+		if (code != OBS_OUTPUT_SUCCESS) {
+			const QString message = detail.isEmpty()
+				? ebTr("EBRecorder.Error.OutputStopped").arg(code)
+				: ebTr("EBRecorder.Error.OutputStopped").arg(code) + QStringLiteral(": ") + detail;
+			setRecordingError(message);
+		}
+		// In libobs, stop can precede active=false. Poll only during this short
+		// teardown interval, even when the diagnostics dialog is closed.
+		context->start();
+		releaseInactiveRecordingOutput();
+		refreshDialogIfOpen();
+	}, Qt::QueuedConnection);
+}
+
+void connectRecordingOutputEvents(obs_output_t *output)
+{
+	g_recordingStopReceived = false;
+	g_recordingStopTimer = new QTimer(g_recordingEventOwner);
+	g_recordingStopTimer->setTimerType(Qt::CoarseTimer);
+	g_recordingStopTimer->setInterval(50);
+	QObject::connect(g_recordingStopTimer, &QTimer::timeout, g_recordingStopTimer, []() {
+		releaseInactiveRecordingOutput();
+		refreshDialogIfOpen();
+	});
+	signal_handler_connect(obs_output_get_signal_handler(output), "stop", recordingOutputStopped,
+			       g_recordingStopTimer);
+}
+
 void setRecordingError(const QString &error)
 {
 	g_recordingError = error;
@@ -1040,7 +1107,7 @@ void setRecordingError(const QString &error)
 bool startLocalRecording(const EncoderInfo &top, QString &error)
 {
 	releaseInactiveRecordingOutput();
-	if (recordingOutputActive()) {
+	if (g_recordingOutput) {
 		error = ebTr("EBRecorder.Error.AlreadyActive");
 		return false;
 	}
@@ -1180,6 +1247,8 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 		return false;
 	}
 
+	// Subscribe before starting: a muxer may fail asynchronously immediately.
+	connectRecordingOutputEvents(output);
 	if (!obs_output_start(output)) {
 		const char *lastError = obs_output_get_last_error(output);
 		const QString detail = lastError && *lastError
@@ -1188,6 +1257,7 @@ bool startLocalRecording(const EncoderInfo &top, QString &error)
 		error = ebTr("EBRecorder.Error.OutputStart").arg(detail);
 		blog(LOG_ERROR, "[EB Recorder] local output start failed%s%s", lastError && *lastError ? ": " : "",
 		     lastError && *lastError ? lastError : "");
+		disconnectRecordingOutputEvents(output);
 		obs_output_release(output);
 		return false;
 	}
@@ -1234,6 +1304,11 @@ void cleanupRecordingOutput()
 {
 	if (!g_recordingOutput)
 		return;
+
+	// Cancel signal delivery before forcing stop/releasing during module unload.
+	QTimer *context = g_recordingStopTimer;
+	disconnectRecordingOutputEvents(g_recordingOutput);
+	delete context;
 
 	if (obs_output_active(g_recordingOutput)) {
 		blog(LOG_WARNING, "[EB Recorder] local output still active during cleanup; forcing stop");
@@ -1739,7 +1814,7 @@ private:
 	{
 		const bool active = recordingOutputActive();
 
-		if (active && g_recordingUiState != RecordingUiState::Stopping)
+		if (active && !g_recordingStopReceived && g_recordingUiState != RecordingUiState::Stopping)
 			g_recordingUiState = RecordingUiState::Recording;
 
 		audioSelectionCombo_->setEnabled(!active);
@@ -2016,6 +2091,7 @@ bool obs_module_load(void)
 
 	logLocaleDiagnostics();
 	initializeSettingsPath();
+	g_recordingEventOwner = new QObject();
 	g_obsExiting = false;
 	registerRecordingHotkeys();
 	obs_frontend_add_tools_menu_item("EB Recorder", openDialog, nullptr);
@@ -2068,6 +2144,10 @@ void obs_module_unload(void)
 	}
 
 	cleanupRecordingOutput();
+	// Also removes deferred deletion events and queued stop callbacks from
+	// previously retired outputs before the module's code is unloaded.
+	delete g_recordingEventOwner;
+	g_recordingEventOwner = nullptr;
 
 	if (!g_dialog.isNull()) {
 		auto *dialog = g_dialog.data();
@@ -2077,3 +2157,4 @@ void obs_module_unload(void)
 
 	blog(LOG_INFO, "[EB Recorder] unloaded");
 }
+

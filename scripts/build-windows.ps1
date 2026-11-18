@@ -1,6 +1,7 @@
 param(
     [switch]$Clean,
-    [switch]$FullClean
+    [switch]$FullClean,
+    [switch]$RunTests
 )
 
 $ErrorActionPreference = 'Stop'
@@ -330,6 +331,7 @@ $PluginConfigureArgs = @(
     '-G', 'Visual Studio 18 2026',
     '-A', 'x64,version=10.0.26100.0',
     "-DCMAKE_PREFIX_PATH=$PrefixPath",
+    "-DEB_RECORDER_BUILD_TESTS:BOOL=$($RunTests.IsPresent)",
     '-DCMAKE_SYSTEM_VERSION:STRING=10.0.26100'
 )
 Invoke-CMake $PluginConfigureArgs 'EB Recorder configure failed.'
@@ -337,6 +339,22 @@ Invoke-CMake $PluginConfigureArgs 'EB Recorder configure failed.'
 Write-Host 'Building EB Recorder...'
 $PluginBuildArgs = @('--build', $PluginBuild, '--config', 'Release', '--parallel')
 Invoke-CMake $PluginBuildArgs 'EB Recorder build failed.'
+
+if ($RunTests) {
+    # The Development SDK install contains import libraries; use the SDK build
+    # and pinned dependency DLLs to run the headless tests without installing OBS.
+    $RuntimeDirs = Get-ChildItem -Path @($ObsBuild, $ObsDepsPrefix, $QtPrefix) -Recurse -File -Filter '*.dll' |
+        ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
+    $OriginalPath = $env:PATH
+    try {
+        $env:PATH = ($RuntimeDirs -join ';') + ';' + $OriginalPath
+        $CTestExe = Join-Path (Split-Path -Parent $CMakeExe) 'ctest.exe'
+        & $CTestExe --test-dir $PluginBuild -C Release --output-on-failure
+        if ($LASTEXITCODE -ne 0) { throw 'Recording lifecycle regression tests failed.' }
+    } finally {
+        $env:PATH = $OriginalPath
+    }
+}
 
 Remove-Item $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host 'Creating staged plugin layout...'
@@ -385,3 +403,4 @@ Write-Host "Release archive: $ZipPath"
 Write-Host "SHA256:          $ReleaseSha256"
 Write-Host "Checksum file:   $ShaPath"
 Write-Host 'Install by extracting the release archive and running INSTALL.cmd.'
+

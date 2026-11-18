@@ -21,10 +21,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Build production package
+      - name: Test installer rollback
+        shell: powershell
+        run: ./tests/install.Tests.ps1
+
+      - name: Build production package and test recording lifecycle
         shell: powershell
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1 -RunTests
           if ($LASTEXITCODE -ne 0) {
             throw "EB Recorder production build failed with exit code $LASTEXITCODE"
           }
@@ -96,3 +100,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub release creation failed with exit code $LASTEXITCODE"
           }
+

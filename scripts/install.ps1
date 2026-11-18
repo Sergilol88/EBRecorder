@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$PluginVersion = '0.3.3'
+$PluginVersion = '0.3.4'
 $BuildRevision = 'r6.5'
 
 if (Get-Process obs64 -ErrorAction SilentlyContinue) {
@@ -50,7 +50,9 @@ $OldVersion = if (Test-Path $OldVersionFile -PathType Leaf) {
 # replaces any broken r4.2/r4.2.1 flat-layout installation as well as older legacy
 # installations, so stale DLL copies cannot survive the update.
 Remove-Item $NewTarget -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $BackupTarget -Recurse -Force -ErrorAction SilentlyContinue
+if (Test-Path $BackupTarget) {
+    throw "A previous installation backup exists at '$BackupTarget'. Close OBS, move this backup outside the OBS plugins folder (for example, to your Desktop), then run INSTALL.cmd again. Keep the backup until the new version is verified."
+}
 New-Item -ItemType Directory -Path $NewTarget -Force | Out-Null
 Copy-Item (Join-Path $Source '*') $NewTarget -Recurse -Force
 
@@ -68,12 +70,16 @@ foreach ($Required in @($InstalledDll, $InstalledEnLocale, $InstalledRuLocale)) 
     }
 }
 
+$BackupCreated = $false
+$NewTargetInstalled = $false
 try {
     if ($Updating) {
         Move-Item $Target $BackupTarget
+        $BackupCreated = $true
     }
 
     Move-Item $NewTarget $Target
+    $NewTargetInstalled = $true
 
     # Validate the final paths before deleting the rollback copy.
     $FinalDll = Join-Path $Target 'eb-recorder.dll'
@@ -95,14 +101,21 @@ try {
 } catch {
     # If the new target was already swapped into place, remove it before restoring
     # the previous installation. This makes the directory swap rollback-safe.
-    if (Test-Path $Target) {
-        Remove-Item $Target -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if (Test-Path $BackupTarget) {
-        Move-Item $BackupTarget $Target
+    $InstallError = $_
+    try {
+        # A failed backup rename leaves the original installation at Target.
+        # Only remove Target when this invocation installed the new folder.
+        if ($NewTargetInstalled -and (Test-Path $Target)) {
+            Remove-Item -LiteralPath $Target -Recurse -Force
+        }
+        if ($BackupCreated) {
+            Move-Item -LiteralPath $BackupTarget -Destination $Target
+        }
+    } catch {
+        throw "Installation failed: $InstallError. Rollback failed: $_. Previous installation backup (if created): $BackupTarget"
     }
     Remove-Item $NewTarget -Recurse -Force -ErrorAction SilentlyContinue
-    throw
+    throw $InstallError
 }
 
 if ($Updating) {
@@ -116,3 +129,4 @@ Write-Host "DLL: $(Join-Path $Target 'eb-recorder.dll')"
 Write-Host "Locale: $(Join-Path $Target 'data\locale')"
 Write-Host 'The previous eb-recorder folder was replaced completely; no stale DLL from an older build remains.'
 Write-Host 'Removal is simple: close OBS and run UNINSTALL.cmd. It removes the plugin and its small OBS plugin_config settings folder.'
+

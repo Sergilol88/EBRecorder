@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.4](release-notes/v0.3.4.md)
+
+Recording lifecycle and installer reliability patch.
+
+- Report asynchronous OBS output errors instead of presenting them as ordinary stops.
+- Finish output cleanup and clean-stop MKV audio bitrate metadata with the dialog closed.
+- Wait for output deactivation and prevent repeated Stop requests from marking failed recordings clean.
+- Cancel retired output callbacks safely during restart and module unload.
+- Preserve the previous installation if a directory swap fails; retain recovery backups and explain how to proceed.
+- Add installer fault-injection and headless libobs/Qt regression tests to Windows CI.
+- Keep newer MSVC warnings visible but non-fatal when building the pinned third-party OBS SDK.
+- No additional video or audio encoder is created. Windows x64 / OBS 33+ package layout is unchanged.
+
 ## [0.3.3](release-notes/v0.3.3.md)
 
 OBS Studio 33+ installation compatibility.
@@ -73,3 +86,4 @@ First public baseline.
 
 - Initial read-only diagnostics prototype.
 - Enumerated OBS Enhanced Broadcasting video encoders and selected the highest-resolution active rendition.
+

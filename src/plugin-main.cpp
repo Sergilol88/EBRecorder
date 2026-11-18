@@ -1286,6 +1286,10 @@ void stopLocalRecording(bool force, const char *reason)
 		releaseInactiveRecordingOutput();
 		return;
 	}
+	// A stop result has already arrived; libobs is only finishing teardown.
+	// In particular, another Stop click must not mark a failed output clean.
+	if (g_recordingStopReceived)
+		return;
 
 	blog(LOG_INFO, "[EB Recorder] stopping local recording (%s, force=%s)", reason ? reason : "unspecified",
 	     force ? "yes" : "no");

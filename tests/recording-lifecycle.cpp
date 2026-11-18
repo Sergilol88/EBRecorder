@@ -72,7 +72,7 @@ QByteArray metadataFixture()
 	return makeEbmlElement(0x18538067, payload, 8);
 }
 
-void testStop(bool fail)
+void testStop(bool fail, bool forced = false)
 {
 	prepareOutput();
 	QTemporaryDir directory;
@@ -85,6 +85,7 @@ void testStop(bool fail)
 	fixture.close();
 	g_recordingAudioBitratesBps = {160000};
 	g_audioBitrateMetadataPending = true;
+	g_cleanStopRequested = !forced;
 	const int before = destroyedOutputs;
 
 	emitStopFromWorker(fail ? OBS_OUTPUT_NO_SPACE : OBS_OUTPUT_SUCCESS, fail ? "disk full" : "");
@@ -97,6 +98,8 @@ void testStop(bool fail)
 		require(g_recordingUiState == RecordingUiState::Error, "runtime failure was not reported");
 		require(g_recordingError.contains("disk full"), "muxer error text was lost");
 		require(!g_cleanStopRequested, "failed output remained eligible for metadata writes");
+		stopLocalRecording(false, "repeated stop after runtime failure");
+		require(!g_cleanStopRequested, "repeated stop marked failed recording clean");
 	}
 
 	obs_output_end_data_capture(g_recordingOutput);
@@ -104,9 +107,10 @@ void testStop(bool fail)
 	require(destroyedOutputs == before + 1, "output was not released exactly once");
 	require(fixture.open(QIODevice::ReadOnly), "could not reopen metadata fixture");
 	const QByteArray finalized = fixture.readAll();
-	if (fail) {
+	if (fail || forced) {
 		require(finalized == original, "failed recording metadata was modified");
-		require(g_recordingUiState == RecordingUiState::Error, "finalization erased the error state");
+		require(g_recordingUiState == (fail ? RecordingUiState::Error : RecordingUiState::Stopped),
+			"finalization has wrong UI state");
 	} else {
 		require(finalized.size() > original.size() && finalized.contains("160000"),
 			"successful closed-dialog stop did not write BPS metadata");
@@ -147,6 +151,7 @@ int main(int argc, char **argv)
 	try {
 		testStop(false);
 		testStop(true);
+		testStop(false, true);
 		testCancelledQueuedCallback();
 		std::puts("PASS: clean stop, runtime error, delayed deactivation, metadata, retired callbacks");
 	} catch (const std::exception &error) {
